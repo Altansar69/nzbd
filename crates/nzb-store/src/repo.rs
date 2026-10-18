@@ -197,6 +197,18 @@ repo! {
             who: &AuditActor,
             ip: Option<&str>,
         ) -> Result<CreateKey, StoreError>;
+        /// Like [`Self::create_api_key_for`], bound to the web session that re-authenticated:
+        /// `NotFound` (nothing written) when `session_hash` is no longer a live session of the owner.
+        fn create_api_key_for_session(
+            &self,
+            key: NewApiKey<'_>,
+            owner_id: i64,
+            session_hash: &[u8; 32],
+            max_active: u32,
+            now: i64,
+            who: &AuditActor,
+            ip: Option<&str>,
+        ) -> Result<CreateKey, StoreError>;
         /// Issues an invitation (admin session; the caller re-authenticated).
         fn create_invite(
             &self,

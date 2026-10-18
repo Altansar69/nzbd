@@ -1603,6 +1603,7 @@ dependencies = [
 name = "nzb-ingest"
 version = "0.5.1"
 dependencies = [
+ "futures-util",
  "libc",
  "notify",
  "nzb-core",

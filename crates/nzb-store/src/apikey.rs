@@ -269,11 +269,60 @@ impl SqliteDb {
         who: &AuditActor,
         ip: Option<&str>,
     ) -> Result<CreateKey, StoreError> {
+        self.create_key_owned(key, owner_id, None, max_active, now, who, ip)
+            .await
+    }
+
+    /// Like [`Self::create_api_key_for`] from a web session that re-authenticated: the key is only
+    /// created while `session_hash` is still a live `active` session of the owner, so a key cannot
+    /// outlive a recovery, reset or revocation that committed after the re-authentication.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] if the session is gone; otherwise as [`Self::create_api_key_for`].
+    #[allow(clippy::too_many_arguments)] // `create_api_key_for` plus the session
+    pub async fn create_api_key_for_session(
+        &self,
+        key: NewApiKey<'_>,
+        owner_id: i64,
+        session_hash: &[u8; 32],
+        max_active: u32,
+        now: i64,
+        who: &AuditActor,
+        ip: Option<&str>,
+    ) -> Result<CreateKey, StoreError> {
+        self.create_key_owned(key, owner_id, Some(session_hash), max_active, now, who, ip)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // the two public entry points above, plus the session
+    async fn create_key_owned(
+        &self,
+        key: NewApiKey<'_>,
+        owner_id: i64,
+        session_hash: Option<&[u8; 32]>,
+        max_active: u32,
+        now: i64,
+        who: &AuditActor,
+        ip: Option<&str>,
+    ) -> Result<CreateKey, StoreError> {
         let label = sanitize_label(key.label).ok_or(StoreError::InvalidLabel)?;
         let mut tx = self.begin_immediate().await?;
         require_actor(&mut tx, owner_id, Role::Uploader)
             .await
             .map_err(|_| StoreError::from(AccountError::Forbidden))?;
+        if let Some(h) = session_hash {
+            let live: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM session WHERE id_hash = ?1 AND account_id = ?2                  AND stage = 'active' AND expires_at > ?3",
+            )
+            .bind(h.as_slice())
+            .bind(owner_id)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if live.is_none() {
+                return Err(StoreError::NotFound);
+            }
+        }
         let Some(id) = insert_key(&mut tx, key, &label, Some(owner_id), max_active, now).await?
         else {
             if instance_cap_hit(&mut tx).await? {

@@ -9,8 +9,11 @@
     clippy::too_many_lines
 )]
 
-use crate::acct_testkit::{T0, env};
-use crate::{AccountError, AuditActor, CreateKey, GrantableRole, NewApiKey, StoreError, Uploader};
+use crate::acct_testkit::{T0, env, sess};
+use crate::{
+    AccountError, AuditActor, CreateKey, GrantableRole, NewApiKey, SessionStage, StoreError,
+    Uploader,
+};
 
 fn new_key(hash: &[u8; 32], rate: Option<u32>) -> NewApiKey<'_> {
     NewApiKey {
@@ -426,4 +429,42 @@ async fn sec_036_demotion_to_viewer_revokes_the_owners_keys() {
             .ends_with("keys_revoked=1")
     );
     let _ = k1;
+}
+
+#[tokio::test]
+async fn web_key_creation_is_bound_to_the_reauthenticated_session() {
+    let e = env().await;
+    let _a = e.admin("root").await;
+    let m = e.uploader("mem1").await;
+    // The session that re-authenticated is gone (a recovery, reset or revocation committed
+    // meanwhile): no key is created.
+    let r =
+        e.db.create_api_key_for_session(
+            new_key(&[210; 32], None),
+            m,
+            &[90; 32],
+            10,
+            T0,
+            &AuditActor::cli(),
+            None,
+        )
+        .await;
+    assert!(matches!(r, Err(StoreError::NotFound)));
+    assert_eq!(e.db.count_active_api_keys_of(m).await.unwrap(), 0);
+    e.db.insert_session(&sess(m, 90, SessionStage::Active, T0), 5)
+        .await
+        .unwrap();
+    let ok =
+        e.db.create_api_key_for_session(
+            new_key(&[211; 32], None),
+            m,
+            &[90; 32],
+            10,
+            T0 + 1,
+            &AuditActor::cli(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(ok, CreateKey::Created(_)));
 }

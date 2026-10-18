@@ -314,3 +314,48 @@ async fn t114_a_failed_group_is_committed_job_by_job() {
     let shas: std::collections::HashSet<_> = log.iter().map(|l| l.sha256).collect();
     assert_eq!(shas.len(), 6, "exactly one ok row per job");
 }
+
+/// A panic inside a group commit is contained: the group (rolled back) is committed job by job, the
+/// other jobs are inserted and only the job that panics alone fails, counted as a panic; the writer
+/// (and so the process) keeps running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panicking_group_commit_is_committed_job_by_job() {
+    let mut e = env(OPTS).await;
+    let _srcs = put_many(&e, 4);
+    let cands = e.candidates();
+    let mut group = Vec::new();
+    for c in cands {
+        match e.pipeline.prepare(Job::watch(c)).await {
+            crate::pipeline::Prepared::Ready(r) => group.push(*r),
+            crate::pipeline::Prepared::Done(r) => panic!("not prepared: {r:?}"),
+        }
+    }
+    assert_eq!(group.len(), 4);
+    let poison = group[1].sha256();
+    e.pipeline.panic_on_commit(poison);
+    let done = e.pipeline.commit(group, DEFAULT_WRITER_HOLD).await;
+    let (mut inserted, mut failed) = (0, 0);
+    for (ready, c) in done {
+        let sha = ready.sha256();
+        let panicked = ready.panicked();
+        match c {
+            crate::pipeline::Committed::Inserted(_) => {
+                assert_ne!(sha, poison);
+                inserted += 1;
+                e.pipeline.finish(ready, c).await.unwrap();
+            }
+            crate::pipeline::Committed::Failed(IngestError::Internal) => {
+                assert_eq!(sha, poison);
+                assert!(panicked);
+                failed += 1;
+                assert!(matches!(
+                    e.pipeline.finish(ready, c).await,
+                    Err(IngestError::Internal)
+                ));
+            }
+            _ => panic!("unexpected commit outcome"),
+        }
+    }
+    assert_eq!((inserted, failed), (3, 1));
+    assert_eq!(e.release_count().await, 3);
+}

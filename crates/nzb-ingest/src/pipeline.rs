@@ -32,8 +32,10 @@
 //!
 //! File names are display data: destination names are `<UTC stamp>-<sha8>` only (SEC-005).
 
+use futures_util::FutureExt as _;
 use nzb_store::prelude::*;
 use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -493,6 +495,9 @@ struct Inner {
     /// Test fault: the next multi-job group fails as a whole once (review 38 L5).
     #[cfg(test)]
     fail_next_group: std::sync::atomic::AtomicBool,
+    /// Test fault: every group transaction holding this release panics.
+    #[cfg(test)]
+    panic_on_commit: std::sync::Mutex<Option<Sha256>>,
 }
 
 /// Test hook: called at each [`CrashPoint`]; `true` simulates the process dying right there.
@@ -515,6 +520,17 @@ struct Ctx {
     /// The parser panicked: counted like a panicking job, so the file is quarantined after
     /// [`MAX_PANICS`] instead of being retried forever.
     panicked: bool,
+}
+
+/// The outcome of a group transaction of exactly one job.
+fn committed_one(res: Result<Vec<GroupOutcome>, StoreError>) -> Committed {
+    match res {
+        Ok(mut v) if v.len() == 1 => v
+            .pop()
+            .map_or(Committed::Failed(IngestError::Internal), Committed::from),
+        Ok(_) => Committed::Failed(IngestError::Internal),
+        Err(e) => Committed::Failed(uploader_error(e)),
+    }
 }
 
 impl Pipeline {
@@ -596,6 +612,8 @@ impl Pipeline {
                 hook: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 fail_next_group: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                panic_on_commit: std::sync::Mutex::new(None),
             }),
         })
     }
@@ -882,7 +900,10 @@ impl Pipeline {
 
     /// Step 6 for a group: one transaction ([`nzb_store::LibraryRepo::insert_release_group`]).
     /// When the whole group fails (not one job: I/O, a lost connection, a deadlock), each job is
-    /// retried alone, so one bad job never fails the others (ARCHITECTURE 5).
+    /// retried alone, so one bad job never fails the others (ARCHITECTURE 5). A panic is contained
+    /// the same way: the group (whose transaction rolled back) is committed one job at a time, and
+    /// a job that panics alone is counted like a panicking job (quarantined after [`MAX_PANICS`])
+    /// instead of taking the writer, and with it the process, down.
     pub(crate) async fn commit(
         &self,
         mut group: Vec<Ready>,
@@ -898,6 +919,38 @@ impl Pipeline {
             }
             return group.into_iter().map(|r| (r, Committed::Crashed)).collect();
         }
+        let caught = AssertUnwindSafe(self.commit_outcomes(&group, hold))
+            .catch_unwind()
+            .await;
+        let outcomes = if let Ok(v) = caught {
+            v
+        } else {
+            tracing::error!(
+                jobs = group.len(),
+                "commit group panicked; committing its jobs one by one"
+            );
+            let now = self.now();
+            let mut one_by_one = Vec::with_capacity(group.len());
+            for r in &mut group {
+                let item = [r.item(now)];
+                let caught = AssertUnwindSafe(self.insert_group(&item, hold))
+                    .catch_unwind()
+                    .await;
+                one_by_one.push(if let Ok(res) = caught {
+                    committed_one(res)
+                } else {
+                    r.ctx.panicked = true;
+                    Committed::Failed(IngestError::Internal)
+                });
+            }
+            one_by_one
+        };
+        group.into_iter().zip(outcomes).collect()
+    }
+
+    /// The outcome of each job of `group`, in order (one group transaction, then one by one when
+    /// the whole group fails).
+    async fn commit_outcomes(&self, group: &[Ready], hold: Duration) -> Vec<Committed> {
         let now = self.now();
         self.inner
             .counters
@@ -907,7 +960,7 @@ impl Pipeline {
             let items: Vec<GroupItem<'_>> = group.iter().map(|r| r.item(now)).collect();
             self.insert_group(&items, hold).await
         };
-        let outcomes = match outcomes {
+        match outcomes {
             Ok(v) if v.len() == group.len() => v.into_iter().map(Committed::from).collect(),
             Ok(_) => group
                 .iter()
@@ -921,24 +974,17 @@ impl Pipeline {
                     "commit group failed; committing its jobs one by one"
                 );
                 let mut one_by_one = Vec::with_capacity(group.len());
-                for r in &group {
+                for r in group {
                     let item = [r.item(now)];
-                    let c = match self.inner.db.insert_release_group(&item, hold).await {
-                        Ok(mut v) if v.len() == 1 => v
-                            .pop()
-                            .map_or(Committed::Failed(IngestError::Internal), Committed::from),
-                        Ok(_) => Committed::Failed(IngestError::Internal),
-                        Err(e) => Committed::Failed(uploader_error(e)),
-                    };
-                    one_by_one.push(c);
+                    one_by_one.push(committed_one(self.insert_group(&item, hold).await));
                 }
                 one_by_one
             }
-        };
-        group.into_iter().zip(outcomes).collect()
+        }
     }
 
-    /// One group transaction (the test build can make a multi-job group fail as a whole once).
+    /// One group transaction (the test build can make a multi-job group fail as a whole once, or
+    /// panic).
     async fn insert_group(
         &self,
         items: &[GroupItem<'_>],
@@ -950,6 +996,13 @@ impl Pipeline {
                 "injected group failure",
             )));
         }
+        #[cfg(test)]
+        if let Some(sha) = self.inner.panic_on_commit.lock().ok().and_then(|g| *g)
+            && items.iter().any(|i| i.new.analysis.sha256 == sha)
+        {
+            #[allow(clippy::panic)] // the injected fault itself
+            std::panic::panic_any("injected commit panic");
+        }
         self.inner.db.insert_release_group(items, hold).await
     }
 
@@ -957,6 +1010,14 @@ impl Pipeline {
     #[cfg(test)]
     pub(crate) fn fail_next_group(&self) {
         self.inner.fail_next_group.store(true, Ordering::SeqCst);
+    }
+
+    /// Test fault injection: every group transaction holding `sha` panics.
+    #[cfg(test)]
+    pub(crate) fn panic_on_commit(&self, sha: Sha256) {
+        if let Ok(mut g) = self.inner.panic_on_commit.lock() {
+            *g = Some(sha);
+        }
     }
 
     /// Step 7 of a committed (or refused) job: source removal, counters, outcome.
@@ -1584,6 +1645,18 @@ pub(crate) struct Ready {
 }
 
 impl Ready {
+    /// Test access: the release hash of this job.
+    #[cfg(test)]
+    pub(crate) fn sha256(&self) -> Sha256 {
+        self.st.analysis.sha256
+    }
+
+    /// Test access: whether this job panicked (counted towards [`MAX_PANICS`]).
+    #[cfg(test)]
+    pub(crate) fn panicked(&self) -> bool {
+        self.ctx.panicked
+    }
+
     /// The job as one item of a commit group.
     fn item(&self, now: i64) -> GroupItem<'_> {
         let job = &self.job;

@@ -516,11 +516,11 @@ impl PgDb {
             audit_failure(&mut tx, now, "login.password_ok", uid, "ok", ip).await?;
         } else {
             // A correct password refused by a lock or throttle is not a guess: it is not counted.
+            // A wrong one is, even when the credentials changed meanwhile (same rule as SQLite).
             if let Some(id) = uid
                 && !disabled
                 && !locked
                 && !verified
-                && !changed
             {
                 record_failure_in(&mut tx, id, ctx.ip_key, FailureKind::Password, now).await?;
             }

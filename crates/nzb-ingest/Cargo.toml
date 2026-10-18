@@ -11,6 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# `catch_unwind` on the commit-group future: a panic there must not end the writer (already in the
+# lockfile; same version and features as nzb-web).
+futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
 libc = "0.2"
 notify = { version = "8", default-features = false }
 nzb-core = { path = "../nzb-core", version = "0.5.1" }

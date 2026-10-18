@@ -24,6 +24,7 @@ use crate::csrf;
 use crate::ctx::ClientIp;
 use crate::error::ApiError;
 use crate::login::{html, internal};
+use crate::session::see_other;
 use axum::response::IntoResponse;
 use nzb_store::Role;
 
@@ -181,6 +182,7 @@ async fn post_create(
         label,
         sess.user_id,
         rate,
+        Some(&sess.id_hash),
         &sess.audit_actor(),
         Some(&ip_text),
         auth.now(),
@@ -214,6 +216,10 @@ async fn post_create(
                 Some("The instance has reached its limit of API keys. Ask an administrator to revoke unused keys."),
             )
             .await
+        }
+        // The session died after the re-authentication (recovery, reset or revocation): sign in again.
+        Err(IssueError::Store(nzb_store::StoreError::NotFound)) => {
+            see_other("/login", Some(auth.clear_cookie()))
         }
         // The account lost its role between the gate and the transaction: same answer as the gate.
         Err(IssueError::Store(nzb_store::StoreError::Account(

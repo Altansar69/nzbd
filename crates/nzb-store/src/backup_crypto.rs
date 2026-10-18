@@ -361,11 +361,10 @@ pub fn decrypt_file(key: &BackupKey, src: &Path, out: &Path) -> Result<(), Backu
         decrypt_stream(key, &mut r, &mut w).and_then(|()| w.flush().map_err(Into::into))
     }
     .and_then(|()| f.sync_all().map_err(Into::into))
-    .and_then(|()| fs::rename(&tmp, out).map_err(Into::into));
-    if res.is_err() {
-        let _ = fs::remove_file(&tmp);
-        return res;
-    }
+    // `rename` would replace a file created at `out` meanwhile; a hard link cannot.
+    .and_then(|()| fs::hard_link(&tmp, out).map_err(Into::into));
+    let _ = fs::remove_file(&tmp);
+    res?;
     File::open(dir)?.sync_all()?;
     Ok(())
 }
