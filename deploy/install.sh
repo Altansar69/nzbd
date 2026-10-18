@@ -751,7 +751,8 @@ if [ "$write_env" = 1 ]; then
   fi
 
   case "${NZBD_NAME_PREFIX:-}" in *[!a-z0-9_-]* | [_-]*) die "NZBD_NAME_PREFIX must be lowercase letters, digits, _ and -, starting with a letter or digit." ;; esac
-  [ "${#NZBD_NAME_PREFIX}" -le 30 ] || die "NZBD_NAME_PREFIX must be at most 30 characters."
+  _np=${NZBD_NAME_PREFIX:-}
+  [ "${#_np}" -le 30 ] || die "NZBD_NAME_PREFIX must be at most 30 characters."
   if [ -f .env ]; then cp -p .env ".env.bak.$(date +%Y%m%d%H%M%S)"; fi
   umask 077
   {
