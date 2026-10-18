@@ -45,7 +45,7 @@ What protects your instance and what you must keep safe.
   in the WAL until they are reused or checkpointed: a raw copy of `nzbd.sqlite`/`-wal` (or of the PostgreSQL volume)
   may still contain it (an `nzbd backup` is rewritten and vacuumed, so it drops free pages; restoring an older backup
   brings the address back). Treat raw database copies like backups.
-- **Invitation path (T135).** `security.invite_path` moves the anonymous invitation page away from `/invite` (the
+- **Invitation path.** `security.invite_path` moves the anonymous invitation page away from `/invite` (the
   installer writes a random `/join-...` path on a fresh install). That is obscurity only: it keeps automated scanners
   and casual probing off the page, nothing more. The path is not a secret (it is in the settings file, `config check`
   output and the admin result pages, and may appear in access logs like any path); the single-use, 160-bit invitation
@@ -60,7 +60,7 @@ What protects your instance and what you must keep safe.
   `account_throttled`). On Docker Desktop, or behind a proxy whose address is not in `server.trusted_proxies`, all
   clients share one address, so the lock and the per-IP budget become shared too: a LAN neighbour who passes the proxy
   login can lock the owner out from that address (documented limitation).
-- **Residual risks** of 3.0 (project security review, section 39.8; also the CHANGELOG): proxy
+- **Residual risks:** proxy
   password strength is the outer control, the per-IP throttles are shared behind Docker Desktop, with SQLite a
   compromised nzbd process can rewrite the audit history ([Choosing a backend](#choosing-a-backend)), the audit chain is
   unkeyed (keep the anchor lines off-host), plaintext backups are neither confidential nor authenticated.

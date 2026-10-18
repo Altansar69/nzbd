@@ -20,7 +20,7 @@ the 2.x data directory is never touched. Bring your NZB files over afterwards by
 **1. Get the files.** Unzip the production bundle (or clone the repository) and go to the `deploy` directory.
 
 ```
-unzip nzbd-3.0.0-production.zip && cd nzbd-3.0.0/deploy
+unzip nzbd-0.5.0-production.zip && cd nzbd-0.5.0/deploy
 ```
 
 **2. Run the installer.**
