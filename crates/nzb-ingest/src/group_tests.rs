@@ -187,7 +187,7 @@ async fn t114_deferred_jobs_are_committed_by_later_groups() {
     }
 }
 
-/// ARCHITECTURE v3 5.2: memory is bounded by bytes. A 2 KiB budget admits at most two of these (~1 KiB) NZBs between
+/// ARCHITECTURE 5.2: memory is bounded by bytes. A 2 KiB budget admits at most two of these (~1 KiB) NZBs between
 /// read and finish whatever the worker count; a job larger than the whole budget takes all of it and still runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn t114_inflight_bytes_stay_within_the_budget() {
@@ -229,7 +229,7 @@ async fn t114_inflight_bytes_stay_within_the_budget() {
     assert_eq!(e.pipeline.stats().inflight_bytes, 0);
 }
 
-/// SEC-092 / ARCHITECTURE v3 3.2: the scanner offers nothing while the outbox depth is above the limit and resumes
+/// SEC-092 / ARCHITECTURE 3.2: the scanner offers nothing while the outbox depth is above the limit and resumes
 /// below half of it; the files wait in the watch folder untouched. Then the store probe of `serve` on the leg's
 /// backend: rows nobody indexes yet are outbox depth.
 #[tokio::test(flavor = "multi_thread")]

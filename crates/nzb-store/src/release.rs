@@ -648,7 +648,7 @@ impl SqliteDb {
         Ok(id)
     }
 
-    /// One ingest **commit group** (ARCHITECTURE v3 5, T114): the jobs of `items` in one writer transaction, each
+    /// One ingest **commit group** (ARCHITECTURE 5, T114): the jobs of `items` in one writer transaction, each
     /// job inside its own savepoint so a job that fails (refused uploader, unknown category, value out of range)
     /// leaves the others intact. The uploader of every job is re-validated inside the transaction (N9).
     ///

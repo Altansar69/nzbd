@@ -327,7 +327,7 @@ pub fn engine_search(
     })
 }
 
-/// The v3 additions to [`SearchIndex`] (ARCHITECTURE v3 3.5 item 4); an extension trait so the 2.x
+/// The v3 additions to [`SearchIndex`] (ARCHITECTURE 3.5 item 4); an extension trait so the 2.x
 /// trait stays unchanged.
 pub trait SearchIndexV3: SearchIndex {
     /// One offset page of `req` with v3 matching, facets and the narrowed/fuzzy flags.

@@ -87,7 +87,7 @@ pub struct CycleReport {
 pub type DepthProbe =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<u64>> + Send>> + Send + Sync>;
 
-/// Pauses the watch-folder scanner while the search index is too far behind the database (ARCHITECTURE v3 3.2
+/// Pauses the watch-folder scanner while the search index is too far behind the database (ARCHITECTURE 3.2
 /// "Lag and backpressure", SEC-092): no candidate is offered while the outbox depth is above `pause_at`, and offering
 /// resumes once it is below half of it (hysteresis, so the scanner does not flap at the limit). Uploads are not
 /// paused (they are rate limited); files simply wait in the watch folder, nothing is lost. `pause_at = 0` never

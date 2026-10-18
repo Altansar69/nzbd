@@ -11,7 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# Search engine (D33 b, docs/v3/ARCHITECTURE.md section 12). Embedded library, MIT, no network. Pinned
+# Search engine (D33 b, ARCHITECTURE section 12). Embedded library, MIT, no network. Pinned
 # exactly: every 0.x release changes the index format (= a rebuild, handled by the `schema` payload check).
 # `mmap` only: no stemmer/stopwords (scene names are not prose), no doc-store compression at all (there are
 # no stored fields; review I4 drops `lz4-compression`), no zstd columnar compression.

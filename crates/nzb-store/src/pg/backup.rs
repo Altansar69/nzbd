@@ -1,4 +1,4 @@
-//! Snapshot backup and restore on Postgres (T112; ARCHITECTURE v3 section 10, `SECURITY_DELTA` 2.6, SEC-044,
+//! Snapshot backup and restore on Postgres (T112; ARCHITECTURE section 10, `SECURITY_DELTA` 2.6, SEC-044,
 //! SEC-052, SEC-094, review L7).
 //!
 //! This nzbd-native export is the default backup (D35 d, owner answer Q8; physical backups stay an expert option).

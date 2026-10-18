@@ -4,7 +4,7 @@
 //! candidate, staged upload file, or in-memory bytes) on a bounded queue and awaits the
 //! [`IngestOutcome`]. Workers run [`Pipeline::process`].
 //!
-//! Ingest at scale (T114, ARCHITECTURE v3 5): `workers` tasks read, hash, parse, categorize and
+//! Ingest at scale (T114, ARCHITECTURE 5): `workers` tasks read, hash, parse, categorize and
 //! store the blob of each job in parallel; one **commit-group writer** then commits up to
 //! `group_max_jobs` prepared jobs (or what arrived within `group_window`) in ONE transaction
 //! ([`nzb_store::LibraryRepo::insert_release_group`]) and finishes each job afterwards (source
@@ -64,18 +64,18 @@ pub const QUEUE_CAP: usize = 64;
 pub const MAX_QUEUE_CAP: usize = 8192;
 /// Hard ceiling of `ingest.workers` (parallel parse).
 pub const MAX_WORKERS: usize = 32;
-/// Default in-flight byte budget (`ingest.max_inflight_bytes`, PERFORMANCE v3 7.3: 256 MiB at ~1M).
+/// Default in-flight byte budget (`ingest.max_inflight_bytes`, PERFORMANCE 7.3: 256 MiB at ~1M).
 pub const DEFAULT_MAX_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
-/// Default jobs per commit group (ARCHITECTURE v3 5).
+/// Default jobs per commit group (ARCHITECTURE 5).
 pub const DEFAULT_GROUP_MAX_JOBS: usize = 256;
-/// Default time a commit group waits for more prepared jobs (ARCHITECTURE v3 5).
+/// Default time a commit group waits for more prepared jobs (ARCHITECTURE 5).
 pub const DEFAULT_GROUP_WINDOW: Duration = Duration::from_millis(50);
 /// Default writer hold cap of one group on SQLite (review 34 L5: ~50 ms).
 pub const DEFAULT_WRITER_HOLD: Duration = Duration::from_millis(50);
 /// Budget unit: permits are KiB, so a 512 MiB budget fits a `u32` permit count.
 const BUDGET_UNIT: u64 = 1024;
 
-/// Throughput and memory settings of [`Pipeline::spawn`] (`[ingest]`, ARCHITECTURE v3 5, T114).
+/// Throughput and memory settings of [`Pipeline::spawn`] (`[ingest]`, ARCHITECTURE 5, T114).
 #[derive(Debug, Clone, Copy)]
 pub struct IngestSettings {
     /// Parallel prepare tasks (read, hash, parse, categorize, blob put); clamped to 1..=[`MAX_WORKERS`].
@@ -680,7 +680,7 @@ impl Pipeline {
             let Some(Queued { job, reply }) = next else {
                 break;
             };
-            // Bytes before the read (ARCHITECTURE v3 5.2): waits while the budget is spent.
+            // Bytes before the read (ARCHITECTURE 5.2): waits while the budget is spent.
             let want = u32::try_from(job.size_hint().div_ceil(BUDGET_UNIT))
                 .unwrap_or(u32::MAX)
                 .clamp(1, total.max(1));
@@ -876,7 +876,7 @@ impl Pipeline {
 
     /// Step 6 for a group: one transaction ([`nzb_store::LibraryRepo::insert_release_group`]).
     /// When the whole group fails (not one job: I/O, a lost connection, a deadlock), each job is
-    /// retried alone, so one bad job never fails the others (ARCHITECTURE v3 5).
+    /// retried alone, so one bad job never fails the others (ARCHITECTURE 5).
     pub(crate) async fn commit(
         &self,
         mut group: Vec<Ready>,

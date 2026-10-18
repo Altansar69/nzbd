@@ -58,7 +58,7 @@ services:
     # A scan cycle (hash, parse, index, move) can outlast Docker's default 10 s before SIGKILL (T061 L-14);
     # the app drains in-flight work on SIGTERM and recovery is safe anyway, but do not rely on it.
     stop_grace_period: 30s
-    # Sized for ~1M releases (docs/v3/PERFORMANCE.md 7.3): the memory-mapped search index is page cache charged to
+    # Sized for ~1M releases (PERFORMANCE 7.3): the memory-mapped search index is page cache charged to
     # this container, so a tight limit costs speed, never safety. Never unlimited (owner Q7).
     deploy:
       resources:

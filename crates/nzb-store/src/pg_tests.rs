@@ -1519,7 +1519,7 @@ async fn sec_087_db_password_never_in_logs_or_errors() {
     assert!(!e.to_string().contains(secret));
 }
 
-/// ARCHITECTURE v3 section 6 (lock order lint): in the v3 store, no function both takes the account-domain lock and
+/// ARCHITECTURE section 6 (lock order lint): in the v3 store, no function both takes the account-domain lock and
 /// locks release rows, and no function locks release rows or `category_stats` after it appended an audit row (the
 /// audit class lock must be the last lock before `COMMIT`).
 #[test]

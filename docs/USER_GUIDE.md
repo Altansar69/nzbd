@@ -6,10 +6,10 @@ Getting NZBs in, searching, exploring a release, and the admin pages.
 
 | Way | How | Notes |
 |---|---|---|
-| Watch folder | Copy or move `*.nzb` into `data/watch/` | Picked up after a stability check; the file is moved into the store, never left behind. Duplicates (same SHA-256) go to `duplicates/`, unreadable or hostile files to `failed/` with a `reason.json`. The operator can add **watch-folder rules** (3.2): a sub-folder or a file-name pattern gives new releases a category and/or a source label (for example everything dropped into `data/watch/From Seedbox/` is labelled `seedbox`). Rules never apply to the upload form or the API, and never relabel a release that is already indexed. |
+| Watch folder | Copy or move `*.nzb` into `data/watch/` | Picked up after a stability check; the file is moved into the store, never left behind. Duplicates (same SHA-256) go to `duplicates/`, unreadable or hostile files to `failed/` with a `reason.json`. The operator can add **watch-folder rules**: a sub-folder or a file-name pattern gives new releases a category and/or a source label (for example everything dropped into `data/watch/From Seedbox/` is labelled `seedbox`). Rules never apply to the upload form or the API, and never relabel a release that is already indexed. |
 | Upload form | **Upload** in the sidebar | Several files at once, optional category (default: Scene-name rules) and a free-text **Source** label applied to every file. Per-file result list. |
 | API | `POST /api/v1/nzb` with `X-Api-Key` (create keys on the Account page or `nzbd apikey create`) | Upload only; nothing can be read back through the API. Behind the proxy you also send the proxy credentials. |
-| Bulk import (operator) | `nzbd import <dir>` on the host (RUNBOOK section 5) | Fills a new library from a directory of NZB files, for example a 2.x `data/store/`. The directory is only read: nothing in it is moved or deleted. Run it again at any time; files already in the library are skipped. |
+| Bulk import (operator) | `nzbd import <dir>` on the host (RUNBOOK section 5) | Fills a new library from a directory of NZB files, for example the `data/store/` of an earlier install. The directory is only read: nothing in it is moved or deleted. Run it again at any time; files already in the library are skipped. |
 
 **Release titles** come from the `.nzb` file name when it looks like a real name: an NZB dropped or uploaded as
 `Some.Movie.2024.1080p-GRP.nzb` is titled `Some.Movie.2024.1080p-GRP` even when everything inside is obfuscated. Names

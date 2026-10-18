@@ -9,10 +9,10 @@ rest. If you prefer to do it by hand, or something goes wrong, the full manual p
 - 2 cores and 4 GB of RAM (SQLite) or 8 GB (PostgreSQL), an SSD, and disk space for your NZB library plus about
   5-8 GB for the database and search index at a million releases.
 
-**nzbd 3 is a fresh start.** It does not upgrade a 2.x library: if the installer finds a 2.x install next to it, it
-explains this, saves the old `.env`, asks the questions again and uses a **new** data directory (default `./data-v3`);
-the 2.x data directory is never touched. Bring your NZB files over afterwards by copying them into the new watch folder
-(or with `nzbd import <dir>`, [RUNBOOK.md](RUNBOOK.md) section 5, "Refill a new library").
+**Fresh install only.** nzbd does not upgrade a library written by an earlier private version: if the installer finds
+the configuration of one next to it, it explains this, saves the old `.env`, asks the questions again and uses a **new**
+data directory (default `./data-new`); the old data directory is never touched. Bring your NZB files over afterwards by
+copying them into the new watch folder (or with `nzbd import <dir>`, [RUNBOOK.md](RUNBOOK.md) section 5, "Refill a new library").
 - A host name your browsers can resolve to this machine (`nzbd.lan` in LAN DNS or a `hosts` entry).
 
 ## Steps
@@ -147,7 +147,7 @@ the build needs internet; the running stack has no outbound network.
 | Build fails while downloading | The build needs internet once (base images, crates, Go modules). Check proxy/DNS and re-run. |
 | `networks have overlapping IPv4` when starting | Another Docker network already uses `172.30.0.0/24`. The installer now picks a free range by itself and stores it in `.env` (`NZBD_BACK_SUBNET`, `NZBD_PROXY_IP`, `NZBD_BACK_RANGE`). If you hit this with an older installer: update `install.sh` and re-run it, keeping your `.env`. |
 | "nzbd is 'unhealthy'" | `docker compose logs nzbd` prints the reason; see the runbook troubleshooting table. |
-| `LEGACY_DATABASE` in the nzbd log | The data directory holds a 2.x (or older) database: v3 refuses it and leaves it untouched. Use a new data directory (re-run the installer, do not keep the `.env`). |
+| `LEGACY_DATABASE` in the nzbd log | The data directory holds a database from an earlier private version: nzbd refuses it and leaves it untouched. Use a new data directory (re-run the installer, do not keep the `.env`). |
 | PostgreSQL: `MIGRATIONS_PENDING` | The schema was not applied: `docker compose --profile setup run --rm setup`, then `docker compose up -d`. |
 | PostgreSQL: "postgres is 'unhealthy'" | `docker compose logs postgres`. The first start initializes the cluster; it needs the passwords from `dbsecrets`. |
 | Browser certificate warning | Install `nzbd-root.crt` and browse by the host name, not the IP. |

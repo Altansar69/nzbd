@@ -30,7 +30,7 @@ http-body-util = "0.1.5"
 nzb-ingest = { version = "0.5.0", path = "../nzb-ingest" }
 nzb-core = { version = "0.5.0", path = "../nzb-core" }
 nzb-store = { version = "0.5.0", path = "../nzb-store" }
-# The v3 search contract (T123): `SearchIndexV3` (prefix, fuzzy fallback, "more than n", narrowed) and the bounded
+# The search contract: `SearchIndexV3` (prefix, fuzzy fallback, "more than n", narrowed) and the bounded
 # degraded browse; workspace-internal, already linked into nzbd.
 nzb-search = { version = "0.5.0", path = "../nzb-search" }
 # Server-side QR code as inline SVG for TOTP enrollment (no JS, no external service).

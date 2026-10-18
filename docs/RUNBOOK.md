@@ -95,8 +95,8 @@ Keys ([configuration reference](CONFIGURATION.md); env form `NZBD__maintenance__
 | `maintenance.keep_backups` | `14` | 1-3650 |
 | `maintenance.backup_encryption_key_file` | unset | recommended (next section) |
 
-The retention periods are no longer settings in v3: they live in the database (`retention_policy`, owner-only on
-PostgreSQL). The 2.x keys `maintenance.log_retention_days` / `account_audit_retention_days` are unknown in v3 and refused by
+The retention periods are not settings: they live in the database (`retention_policy`, owner-only on
+PostgreSQL). The keys `maintenance.log_retention_days` / `account_audit_retention_days` are unknown and refused by
 `config check`; remove them from `config/nzbd.toml`.
 
 The scheduler's output is on the same disk as the database: **it is not an off-host backup**. Copy the backups and the
@@ -482,7 +482,7 @@ want it, otherwise remove that header from the middleware.
 - The enrollment token is printed once on stdout: do not run these commands in a terminal that is logged.
 - There is no HTTP password-reset or registration endpoint, by design.
 
-### Several accounts (v2)
+### Several accounts
 
 One shared library, three roles (`viewer`, `uploader`, `admin`; D40: an uploader adds NZBs but edits no metadata, only admins change category and source label), invite-only. Everything below is off until
 `security.multi_user = true` (restart); `security.registration_enabled = false` additionally removes the invitation
@@ -685,7 +685,7 @@ A file whose SHA-256 is already indexed is moved to `duplicates/` (default; `ing
 removes the extra copy instead). Nothing in `duplicates/` is read again; the content is identical to an indexed NZB,
 so removing old files there by hand is safe. Duplicate *uploads* are acknowledged (`200 duplicate`) and not kept.
 
-### Watch-folder rules (3.2)
+### Watch-folder rules
 
 `[[ingest.rules]]` (CONFIGURATION §Watch-folder rules) give watch files a category and/or a source label by first-level
 sub-folder or file-name pattern. After editing them:
@@ -721,20 +721,18 @@ when a release is created; to relabel existing releases use the bulk source edit
 
 ## 5. Upgrade and rollback
 
-**Coming from nzbd 2.x (or older): there is no upgrade.** nzbd 3 starts a new library (D37). A 2.x database is refused
-with `LEGACY_DATABASE` and left byte-identical; nothing migrates it. Install v3 next to it with a **new data
-directory** (the installer detects the 2.x `.env`, keeps it as `.env.bak.<time>` and refuses the old data directory),
-create your accounts again, and bring the NZB files over with `nzbd import` (below; or copy them into the new watch
-folder). Keep the 2.x data directory and a 2.x backup until you no longer need them; the 2.x images and tags still run
-it.
+**Coming from an earlier private version: there is no upgrade.** nzbd starts a new library. A database written by an
+earlier version is refused with `LEGACY_DATABASE` and left byte-identical; nothing migrates it. Install next to it with
+a **new data directory** (the installer detects the old `.env`, keeps it as `.env.bak.<time>` and refuses the old data
+directory), create your accounts again, and bring the NZB files over with `nzbd import` (below; or copy them into the
+new watch folder). Keep the old data directory and a backup until you no longer need them.
 
-### Refill a new library from 2.x NZB files (`nzbd import`)
+### Refill a new library from existing NZB files (`nzbd import`)
 
 `nzbd import <dir>` re-ingests every `*.nzb` below a directory through the normal pipeline (same parser, limits and
 categories as the watch folder). The directory is **read only** for nzbd: files are copied into the new store, never
-moved, renamed or deleted, whatever happens. A 2.x `data/store/` (`aa/bb/<sha256>.nzb`) works as it is; its hidden
-`.trash/`, `.tmp/` and `.gc-trash/` folders are not imported (releases deleted in 2.x are not brought back). A 2.x install with the
-`db` blob backend must first export its files with 2.x's own `nzbd store migrate --to fs`. What does **not** come
+moved, renamed or deleted, whatever happens. An existing `data/store/` (`aa/bb/<sha256>.nzb`) works as it is; its hidden
+`.trash/`, `.tmp/` and `.gc-trash/` folders are not imported (releases deleted there are not brought back). What does **not** come
 across: accounts, API keys, sessions, the audit and ingest history, manual category changes and source labels.
 
 1. Mount the old files read-only into a one-off container and make them readable for the container user (`$IDS`) (or copy them
@@ -750,7 +748,7 @@ across: accounts, API keys, sessions, the audit and ingest history, manual categ
 
 ```
 docker compose stop nzbd                                              # SQLite only
-docker compose run --rm --no-deps -v /srv/nzbd-2x/data/store:/import:ro nzbd import /import
+docker compose run --rm --no-deps -v /srv/nzbd-old/data/store:/import:ro nzbd import /import
 docker compose start nzbd                                             # SQLite only
 ```
 
@@ -760,7 +758,7 @@ trashed (releases deleted from this library: their digest is in the trash, so a 
 link) and ignored entries, plus the first 50 problem names (escaped). Exit 0 = everything is in the library, 2 =
 something was skipped, trashed, failed, cut by `--max-entries` or interrupted, 1 = refused. **Run it again** whenever
 it stops or you add files: files already in the library are recognised by their SHA-256 and skipped without a log
-line, so nothing is imported twice, and releases an administrator deleted since stay deleted (`TRASHED`). Options: `--max-depth N` (default 8, at most 32; a 2.x store needs 2) and
+line, so nothing is imported twice, and releases an administrator deleted since stay deleted (`TRASHED`). Options: `--max-depth N` (default 8, at most 32; a store needs 2) and
 `--max-entries N` (default 5,000,000 directory entries). Rejected files are not copied to `failed/`; fix or remove them
 in the source and run again. The run is audited as `library_import` (actor `cli`, counts only); its ingest log rows say `import` in the detail
 column (they are recorded with source `watch`, unattributed).
@@ -768,9 +766,9 @@ On PostgreSQL the import opens its own connection pools next to the server's; wi
 another CLI command or `psql` during a large import can be refused for lack of connections (try again after it). On SQLite the new
 releases are indexed when `serve` starts again: until the backlog is done the **Search index lag** health line is WARN
 and new lists fill up gradually (the browse still works). Speed depends on the disk (each file is written with an
-fsync) and on NZB size; nothing was benchmarked yet (T117).
+fsync) and on NZB size; nothing was benchmarked yet.
 
-**Within 3.x.** Migrations are **forward-only**: an older binary must not be started on a database that a newer one
+**Rolling back.** Migrations are **forward-only**: an older binary must not be started on a database that a newer one
 migrated. The pre-upgrade backup is your rollback. SQLite migrates on start (behind the `503 STARTING` page);
 PostgreSQL is migrated by the one-shot `setup` service (the installer runs it), never by `serve`.
 
@@ -803,17 +801,6 @@ Roll back (only when the new version misbehaves):
 
 Data ingested since the upgrade appears as store-only files (section 2, "Check and finish" steps 2 and 5 re-index them).
 
-**3.1 -> 3.2 (saved searches, D38 d).** 3.2 adds one table (`saved_search`: PostgreSQL migration `0008`, SQLite
-migration `0002`), so **3.2 is not database-compatible with 3.1**: once 3.2 has started (SQLite) or `setup` has
-migrated (PostgreSQL), a 3.1 binary refuses the database (SQLite: `migration failed ... VersionMissing(2)` before any
-check or change; PostgreSQL: readiness `SCHEMA_NEWER`). That refusal is the safety net, not a fault: **rollback = the
-steps above with the pre-upgrade backup** (taken in step 1 of the upgrade). Like any rollback it loses what the
-database recorded after that backup, here including every saved search (new NZBs come back as store-only files, as
-above). Saved searches are included in every later backup and
-restore (SQLite: the whole file; PostgreSQL: the snapshot exports `saved_search` like `user_pref`). The upgrade itself is tested on both backends by
-`upgrade_3_1_to_3_2_keeps_data_and_adds_saved_search` / `pg_upgrade_3_1_to_3_2_keeps_data_and_adds_saved_search`
-(`crates/nzb-store/src/upgrade_tests.rs`, in `scripts/dev ci`).
-
 Base images are pinned by digest in `deploy/Dockerfile`, `deploy/Dockerfile.proxy` and
 `deploy/compose-example/compose.postgres.yaml`. A rebuild does not change them; bump digests deliberately.
 
@@ -832,8 +819,8 @@ A backup you never restored is a hope, not a backup. Practise this drill; it nev
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `nzbd` refuses to start with `DB_FILE_MODE` (3.x, SQLite backend) | SEC-102: the database directory is writable by group/other (a NAS bind mount often reports 0777), or the database file (or `-wal`/`-shm`) is a symbolic link, not a regular file, has a second name (hard link) or belongs to another uid. A file of the service uid that is merely group/other-readable is fixed to 0600 with a warning instead. | `chmod 0750` the data directory (`chmod -R u=rwX,go= data/` on a bind mount), replace a link with the real file, remove the extra hard link, `chown -h "$IDS"` the files (the container user). |
-| `nzbd` refuses to start with `LEGACY_DATABASE` (3.x) | `paths.db` points at a 2.x (or older) database. 3.x starts from a fresh library and never upgrades or modifies a 2.x file (D37). | Point `paths.db` at a new file (or an empty directory) and bring the NZB files in with `nzbd import <dir>`; keep the 2.x data directory as it is. |
+| `nzbd` refuses to start with `DB_FILE_MODE` (SQLite backend) | SEC-102: the database directory is writable by group/other (a NAS bind mount often reports 0777), or the database file (or `-wal`/`-shm`) is a symbolic link, not a regular file, has a second name (hard link) or belongs to another uid. A file of the service uid that is merely group/other-readable is fixed to 0600 with a warning instead. | `chmod 0750` the data directory (`chmod -R u=rwX,go= data/` on a bind mount), replace a link with the real file, remove the extra hard link, `chown -h "$IDS"` the files (the container user). |
+| `nzbd` refuses to start with `LEGACY_DATABASE` | `paths.db` points at a database written by an earlier private version. nzbd starts from a fresh library and never upgrades or modifies such a file. | Point `paths.db` at a new file (or an empty directory) and bring the NZB files in with `nzbd import <dir>`; keep the old data directory as it is. |
 | Every page returns `400 BAD_HOST` | Browser uses a name that is not `localhost`, an IP literal or in `server.allowed_hosts`; compose derives it from `NZBD_SITE`. | Browse to exactly `https://<NZBD_SITE>/`, or set `NZBD_SITE` in `deploy/.env` to the name you use (lowercase, no port) and `docker compose up -d`. Several names: add them in `compose.override.yaml` with `NZBD__server__allowed_hosts='["a.lan","b.lan"]'`. |
 | Login or any form POST shows `CSRF_REJECTED` | The app requires the browser's `Sec-Fetch-Site` header and an `Origin` equal to the host. Missing on Safari < 16.4, some very old browsers and privacy tools that strip headers; or the page was opened under another name/scheme than the form posts to; or the session/token expired. | Use a current browser, one stable URL (`https://<NZBD_SITE>/`), reload the page and retry. There is intentionally no weaker fallback. |
 | `429` / "Rate limited" | Per-IP throttles (login 10 POST/min, UI 300/min, downloads 30/min, uploads 60/min/IP and 30/min per API key or per account, 20 per hour failures per account) or lockout after failed logins. Behind Docker Desktop all LAN clients share one IP. | Wait `Retry-After` seconds. Throttle batch API uploads below 30/min. Lockout: wait, finish a login, or `user reset-password`. |
@@ -841,7 +828,7 @@ A backup you never restored is a hope, not a backup. Practise this drill; it nev
 | Browser warns about the certificate | The proxy CA is not trusted on this device, or you browse by IP instead of `NZBD_SITE`. | Install the root (INSTALL step 6) and use the site name. |
 | `docker compose up` fails: "Address already in use" / "Pool overlaps" | The fixed proxy address or subnet collides with another Docker network. | Set `NZBD_BACK_SUBNET`, `NZBD_PROXY_IP`, `NZBD_BACK_RANGE` in `.env` to an unused /24 (proxy IP inside the subnet, outside the range). |
 | Port 443 already in use | Another service on the host. | Set `NZBD_HTTPS_PORT` (and browse with `:port`), or `NZBD_BIND` to a different address. |
-| nzbd log: `LEGACY_DATABASE` | The data directory holds a 2.x (or older) database. v3 starts a new library and never touches it. | Point `NZBD_DATA_DIR` at a new directory (section 5, "Coming from nzbd 2.x"). |
+| nzbd log: `LEGACY_DATABASE` | The data directory holds a database from an earlier private version. nzbd starts a new library and never touches it. | Point `NZBD_DATA_DIR` at a new directory (section 5, "Coming from an earlier private version"). |
 | nzbd log: `MIGRATIONS_PENDING` (PostgreSQL) | The schema is older than the binary; `serve` never migrates. | `docker compose stop nzbd`, `docker compose --profile setup run --rm setup`, then `docker compose up -d`. |
 | `setup` says `APP_SESSIONS_ACTIVE` | nzbd (or another app-role client) is connected; a migration or restore under a live server is refused. | `docker compose stop nzbd` and run it again. |
 | nzbd log: `RESTORE_PENDING` | A restored backup (every nzbd backup carries the mark) has not been finished. | Section 2, "Check and finish" step 3 (`db restore-finish --yes`). |
@@ -866,7 +853,7 @@ A backup you never restored is a hope, not a backup. Practise this drill; it nev
 | `docker compose exec nzbd nzbd ...` says executable not found | The binary is `/nzbd`, not on PATH. | Use `/nzbd`. |
 | Startup or `config check` says `INVITE_PATH_INVALID` | `security.invite_path` (or `NZBD__security__invite_path`) is not `/` + one segment of 6-64 `A-Z a-z 0-9 _ -`, or it equals, starts with or is a prefix of a built-in route (`/login`, `/admin`, `/static`, ...); the message names the rule. | Pick another value (e.g. `/join-` + random letters) and restart. |
 | An invitee gets a 404 at `/invite` | `security.invite_path` moves the page; `/invite` is then a plain 404 by design. | Hand out the address `nzbd config check` (or the invitation page) prints. |
-| `user create` says `MULTI_USER_OFF` (or, on 1.x, that a user already exists) | A second account needs `security.multi_user = true`; invitations also need `security.registration_enabled = true` (`INVITES_DISABLED`). | Set the key, restart, retry; or use `reset-password` / `reset-mfa` for the existing account. |
+| `user create` says `MULTI_USER_OFF` | A second account needs `security.multi_user = true`; invitations also need `security.registration_enabled = true` (`INVITES_DISABLED`). | Set the key, restart, retry; or use `reset-password` / `reset-mfa` for the existing account. |
 | A signed-in user gets `404` on a page you know exists, or the Users page is missing for an uploader, or an uploader cannot change a category | The page needs a higher role; a refused role is indistinguishable from an unknown path by design. | Check the role with `user list`; see `authz_denied` in the audit list; change the role with the Users page (uploader <-> viewer) or `user set-role`. Only admins edit metadata (D40). |
 
 ## 7. Command reference (`nzbd`)
@@ -913,9 +900,9 @@ sub-folder swap could make it list directories the service user cannot read; as 
 
 ## 8. NZB files (`paths.store`)
 
-v3 keeps the NZB files on the filesystem only, for both database backends (D36 a, D37): `data/store/<sha[0:2]>/<sha[2:4]>/<sha>.nzb`,
-immutable and named by SHA-256. The 2.x database blob backend (`store.backend = "db"`, `nzbd store migrate`) does not
-exist in v3; the setting is refused with `STORE_DB_BACKEND_REMOVED`. Back up `data/store/` next to every database
+nzbd keeps the NZB files on the filesystem only, for both database backends (D36 a, D37): `data/store/<sha[0:2]>/<sha[2:4]>/<sha>.nzb`,
+immutable and named by SHA-256. There is no database blob backend; `store.backend = "db"` is refused with
+`STORE_DB_BACKEND_REMOVED`. Back up `data/store/` next to every database
 backup (section 2).
 
 ## 9. Audit export, chain verification and metrics (T105)
@@ -957,9 +944,7 @@ container before the first start of the new version**: a still-running pre-0013 
 chain columns after the migration; they are flagged `unchained` forever and `audit verify` exits 2.
 
 Normal causes of a broken chain are restoring a mix of files (a database file with another one's WAL) and editing
-the database with an SQL tool; a plain restore of one backup file is consistent. After an upgrade from 1.x/2.0-rc the
-first start chains the existing rows; `audit verify` before that first start exits 1 ("not chained yet").
-`nzbd health` shows the cheap check ("Audit log chain") and the deep check the full walk. The first start after the
+the database with an SQL tool; a plain restore of one backup file is consistent. `nzbd health` shows the cheap check ("Audit log chain") and the deep check the full walk. The first start after the
 upgrade chains the existing rows (about 20 s per 300,000 rows) and logs `audit log hash chain created for the existing
 rows` behind the starting page.
 

@@ -1,5 +1,5 @@
 //! Detection of restores nzbd did not perform and of a switched library (review 30 M2 b, review 34 M2/M3;
-//! ARCHITECTURE v3 10 and 13.5; SEC-094, SEC-101), shared by both backends.
+//! ARCHITECTURE 10 and 13.5; SEC-094, SEC-101), shared by both backends.
 //!
 //! `serve` keeps `paths.state/db-anchor.json` (written tmp + fsync + rename, 0600) with the library identity (backend
 //! and `db_state.instance_id`), on Postgres the cluster's `system_identifier`, the last values of the `audit_log`,

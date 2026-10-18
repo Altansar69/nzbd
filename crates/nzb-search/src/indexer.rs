@@ -1,5 +1,5 @@
 //! The indexer: the single writer that applies the transactional outbox to the index, and the
-//! new-generation rebuild (ARCHITECTURE v3 3.2-3.3, SEC-091, SEC-092).
+//! new-generation rebuild (ARCHITECTURE 3.2-3.3, SEC-091, SEC-092).
 //!
 //! The source of truth is abstract ([`IndexSource`]); T112 implements it on Postgres. Ordering, per
 //! round: read outbox rows -> load the **current** rows of their ids (one snapshot) -> `delete_term` +

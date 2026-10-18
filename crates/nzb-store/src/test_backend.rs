@@ -1,4 +1,4 @@
-//! The backend matrix of the web, ingest and nzbd test suites (ARCHITECTURE v3 13.7, review 34 M4, SEC-104): the
+//! The backend matrix of the web, ingest and nzbd test suites (ARCHITECTURE 13.7, review 34 M4, SEC-104): the
 //! harnesses build their [`Store`] from `NZBD_TEST_BACKEND` (`sqlite` or `postgres`). There is **no default**: an
 //! unset or unknown value fails the harness, so a CI leg can never silently test the other backend. Each test binary
 //! prints `NZBD_TEST_BACKEND opened <backend> by <binary>` once on stderr, which `scripts/ci.sh` checks per leg and per

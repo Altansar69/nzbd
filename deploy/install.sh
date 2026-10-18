@@ -12,7 +12,7 @@
 # from the templates in deploy/compose-example/ and your answers.
 #
 # Safe to re-run: an existing .env is kept unless you say otherwise, an existing TOTP key or database password is never
-# overwritten, a re-run never switches the database backend, nothing is deleted. v3 starts a NEW library: a 2.x
+# overwritten, a re-run never switches the database backend, nothing is deleted. nzbd starts a NEW library: an earlier private
 # install found here is left untouched (its data directory is never used; import NZB files with `nzbd import`).
 # Secrets: the proxy password is read without echo, goes to Docker over stdin (never argv, never written to disk) and
 # only a bcrypt hash lands in .env.
@@ -409,14 +409,14 @@ same_dir() {
   a=${1#./}; a=${a%/}; b=${2#./}; b=${b%/}
   [ "$a" = "$b" ]
 }
-# legacy_env: the .env in $ENVF was written by a 2.x installer (every v3 installer writes NZBD_DB_BACKEND), so a 2.x
+# legacy_env: the .env in $ENVF was written by an earlier private installer (every current installer writes NZBD_DB_BACKEND), so an old
 # library lives here (D37: never upgraded, never touched).
 legacy_env() { [ -f "$ENVF" ] && ! grep -q '^NZBD_DB_BACKEND=' "$ENVF"; }
-# Test hook for scripts/deploy_check.sh static: 'legacy' or 'v3' for the .env-shaped FILE.
+# Test hook for scripts/deploy_check.sh static: 'legacy' or 'current' for the .env-shaped FILE.
 if [ "${1:-}" = --print-library ]; then
   [ $# -eq 2 ] || die "usage: install.sh --print-library ENVFILE"
   case "$2" in /*) ENVF=$2 ;; *) ENVF="$OLDPWD/$2" ;; esac
-  if legacy_env; then echo legacy; else echo v3; fi
+  if legacy_env; then echo legacy; else echo current; fi
   exit 0
 fi
 
@@ -528,21 +528,21 @@ NEED_NET=""
 # ---- 2. configuration -----------------------------------------------------------------------------
 step "2/9 Configuration (.env)"
 write_env=1
-# v3 is a fresh start (D37): a .env written by a 2.x installer (every v3 installer writes NZBD_DB_BACKEND) means a 2.x
-# library lives next to this script. It is never upgraded and never touched: v3 gets a new data directory.
+# A fresh start (D37): a .env written by an earlier private installer (every current installer writes NZBD_DB_BACKEND) means an old
+# library lives next to this script. It is never upgraded and never touched: a new data directory is used.
 LEGACY=0; OLD_DATA=""; PREV_BACKEND=""
 if [ -f .env ]; then
   PREV_BACKEND=$(get NZBD_DB_BACKEND)
   if legacy_env; then
     LEGACY=1; OLD_DATA=$(get NZBD_DATA_DIR); OLD_DATA=${OLD_DATA:-./data}
-    warn "this directory holds the configuration of an nzbd 2.x install (data directory: $OLD_DATA)."
-    say "nzbd 3 starts a NEW, empty library. It does not upgrade a 2.x database: it refuses one (LEGACY_DATABASE) and"
-    say "never modifies it. Nothing of the 2.x install is changed or deleted; its data directory is not used by v3."
-    say "Its containers in this directory are replaced by the v3 stack when you deploy (keep a backup of the 2.x data)."
+    warn "this directory holds the configuration of an earlier private nzbd install (data directory: $OLD_DATA)."
+    say "nzbd starts a NEW, empty library. It does not upgrade an earlier database: it refuses one (LEGACY_DATABASE) and"
+    say "never modifies it. Nothing of the earlier install is changed or deleted; its data directory is not used."
+    say "Its containers in this directory are replaced by the new stack when you deploy (keep a backup of the old data)."
     say "To bring your NZB files over afterwards: copy them into the new watch folder, or use"
-    say "'docker compose exec nzbd /nzbd import <dir>' (copies, never moves; docs/v3/MIGRATION.md section 1)."
-    say "Your 2.x .env is kept as .env.bak.<time>; the questions below are asked again."
-    yesno "Set up a new v3 library here?" y || die "nothing was changed."
+    say "'docker compose exec nzbd /nzbd import <dir>' (copies, never moves; RUNBOOK section 5)."
+    say "Your old .env is kept as .env.bak.<time>; the questions below are asked again."
+    yesno "Set up a new library here?" y || die "nothing was changed."
   elif yesno "Keep the existing .env and skip these questions?" y; then
     write_env=0
   fi
@@ -710,12 +710,12 @@ if [ "$write_env" = 1 ]; then
     ask PORT "HTTPS port" "443"
     case "$PORT" in *[!0-9]* | "") die "port must be a number." ;; esac
   fi
-  if [ "$LEGACY" = 1 ]; then ddef=./data-v3; else ddef=./data; fi
+  if [ "$LEGACY" = 1 ]; then ddef=./data-new; else ddef=./data; fi
   while :; do
     ask DATA "Data directory (NZB files, search index, SQLite database; keep it on a disk with space)" "$ddef"
     case "$DATA" in "" | *[!A-Za-z0-9._/-]*) warn "use letters, digits, '.', '_', '-' and '/' only."; continue ;; esac
     if [ "$LEGACY" = 1 ] && same_dir "$DATA" "$OLD_DATA"; then
-      warn "'$DATA' is the 2.x data directory: v3 never uses it. Pick another one."; continue
+      warn "'$DATA' is the data directory of an earlier install: it is never reused. Pick another one."; continue
     fi
     break
   done
@@ -738,7 +738,7 @@ if [ "$write_env" = 1 ]; then
   case "$PREV_BACKEND" in postgres) bdef=2 ;; *) bdef=1 ;; esac
   ask DBCHOICE "Choose" "$bdef"
   case "$DBCHOICE" in 1) DB_BACKEND=sqlite ;; 2) DB_BACKEND=postgres ;; *) die "answer 1 or 2." ;; esac
-  # A re-run never switches an existing library (ARCHITECTURE v3 13.5): the SQLite -> PostgreSQL move is deferred (D37).
+  # A re-run never switches an existing library (ARCHITECTURE 13.5): the SQLite -> PostgreSQL move is deferred (D37).
   if [ -n "$PREV_BACKEND" ] && [ "$PREV_BACKEND" != "$DB_BACKEND" ]; then
     die "this install uses $PREV_BACKEND; switching the backend of an existing library is not supported in 0.5 (the move script is deferred). Answer $bdef, or deploy a new library from another directory."
   fi

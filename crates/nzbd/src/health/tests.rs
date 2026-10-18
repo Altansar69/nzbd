@@ -175,7 +175,7 @@ fn a_warning_gives_one_and_a_failure_gives_two() {
     assert!(text.contains("FAIL") && text.contains("failure(s)"));
 }
 
-/// T114: the index lag line (ARCHITECTURE v3 3.2): OK while the oldest pending change is younger than
+/// T114: the index lag line (ARCHITECTURE 3.2): OK while the oldest pending change is younger than
 /// `search.lag_warn_secs`, WARN past it, WARN while the scanner is paused for the lag, WARN when unreadable.
 #[test]
 fn t114_index_lag_line_warns_past_the_threshold_and_while_paused() {

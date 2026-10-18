@@ -748,7 +748,7 @@ pub fn counter_checks(live: Option<LiveFacts>, cfg: CfgFacts, now: i64) -> Vec<C
     v
 }
 
-/// Index lag (T114, ARCHITECTURE v3 3.2): changes not yet in the search index and the age of the oldest. WARN beyond
+/// Index lag (T114, ARCHITECTURE 3.2): changes not yet in the search index and the age of the oldest. WARN beyond
 /// `search.lag_warn_secs`, and while the watch-folder scanner is paused for it.
 #[must_use]
 pub fn index_lag_check(

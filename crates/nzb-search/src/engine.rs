@@ -1,5 +1,5 @@
 //! One opened index generation: Tantivy index + reader + the single writer, and the commit payload
-//! that binds it to a database (ARCHITECTURE v3 3.2-3.3, SEC-091).
+//! that binds it to a database (ARCHITECTURE 3.2-3.3, SEC-091).
 //!
 //! Layout of `search.index_dir` (from config only, never derived from input; 0700):
 //! ```text

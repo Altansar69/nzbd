@@ -313,7 +313,7 @@ pub struct Config {
     pub search: Search,
 }
 
-/// `[search]` (ARCHITECTURE v3 section 7): the Tantivy index of both backends. Values are clamped into the hard
+/// `[search]` (ARCHITECTURE section 7): the Tantivy index of both backends. Values are clamped into the hard
 /// ranges of `nzb_search::config` (configuration may only lower a bound).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -344,7 +344,7 @@ pub struct Search {
     /// Prefix matching of the last token (bounded by the expansion budgets, Q5).
     pub prefix: bool,
     /// The watch-folder scanner pauses while the search outbox holds more than this many changes and resumes below
-    /// half of it (ARCHITECTURE v3 3.2, SEC-092); `0` never pauses. Uploads are not paused.
+    /// half of it (ARCHITECTURE 3.2, SEC-092); `0` never pauses. Uploads are not paused.
     pub lag_pause_rows: u64,
     /// Health turns WARN when the oldest unindexed change is older than this, seconds (>= 1).
     pub lag_warn_secs: u64,
@@ -626,7 +626,7 @@ pub struct Ingest {
     /// File must be unchanged this long before ingest.
     pub stable_secs: u64,
     /// Parallel ingest workers (read, hash, parse, blob put); `0` = automatic: available cores - 1,
-    /// at least 1 (ARCHITECTURE v3 5.3). At most 32.
+    /// at least 1 (ARCHITECTURE 5.3). At most 32.
     pub workers: u32,
     /// Jobs that may wait in the ingest queue (1..=8192; the scanner offers at most the free slots
     /// per cycle, uploads beyond it get `503 QUEUE_FULL`).
@@ -947,7 +947,7 @@ impl Default for Security {
     }
 }
 
-/// `[db]` (ARCHITECTURE v3 7 and 13.5). `backend` selects the store; the Postgres keys apply only to `postgres` (and
+/// `[db]` (ARCHITECTURE 7 and 13.5). `backend` selects the store; the Postgres keys apply only to `postgres` (and
 /// are a warning with `sqlite`, `DB_KEY_FOR_OTHER_BACKEND`). The SQLite file is `paths.db`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]

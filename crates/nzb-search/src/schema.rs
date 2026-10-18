@@ -1,4 +1,4 @@
-//! Tantivy schema, index schema version 2 (`docs/v3/DATA_MODEL.md` 5.1).
+//! Tantivy schema, index schema version 2 (`docs/DATA_MODEL.md` 5.1).
 //!
 //! No stored fields and no doc store content: the index holds ids, sort/filter columns and the analyzed
 //! display text that Postgres also holds (sanitized NZB data). Nothing secret, no account data

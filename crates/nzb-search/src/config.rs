@@ -1,4 +1,4 @@
-//! `[search]` settings (ARCHITECTURE v3 section 7) with their hard maxima: configuration may only
+//! `[search]` settings (ARCHITECTURE section 7) with their hard maxima: configuration may only
 //! lower a bound, never raise it past the constants here.
 //!
 //! Owner questions Q1, Q2 and Q5 (TASKS T111) were answered by D35 (2026-10-15): "more than n" past

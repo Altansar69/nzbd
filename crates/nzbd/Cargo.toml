@@ -20,7 +20,7 @@ base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "std"] }
 nzb-core = { version = "0.5.0", path = "../nzb-core" }
 nzb-ingest = { version = "0.5.0", path = "../nzb-ingest" }
-# The v3 search index (T113) for both backends: the indexer task in `serve` and `nzbd search ...`.
+# The search index for both backends: the indexer task in `serve` and `nzbd search ...`.
 nzb-search = { version = "0.5.0", path = "../nzb-search" }
 nzb-store = { version = "0.5.0", path = "../nzb-store" }
 nzb-web = { version = "0.5.0", path = "../nzb-web" }

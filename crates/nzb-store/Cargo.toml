@@ -17,15 +17,14 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 hmac = "0.12"
 zeroize = "1"
 nzb-core = { path = "../nzb-core", version = "0.5.0" }
-# SQLite driver with bundled libsqlite3 (includes FTS5): the 2.x store, kept compiled until the v3 port is complete
-# (T112) and then only in `nzb-migrate` (T115). `postgres` (T112, D33): the v3 store; pure-Rust driver (no libpq),
+# SQLite driver with bundled libsqlite3 (includes FTS5): the SQLite store. `postgres` (D33): the PostgreSQL store; pure-Rust driver (no libpq),
 # SCRAM-SHA-256, arrays, COPY. No `tls-*` feature at all (review M5, owner question Q10): nzbd sets
 # `PgSslMode::Disable` explicitly and links no TLS stack.
 sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "sqlite"] }
 # NzbStore must be object-safe (FsStore now, DbStore later) with async methods; maintained, tiny.
 async-trait = "0.1"
 serde_json = "1"
-# StreamExt for the `COPY ... TO STDOUT` stream of the v3 snapshot backup (T112). Already in the lockfile and compiled
+# StreamExt for the `COPY ... TO STDOUT` stream of the snapshot backup. Already in the lockfile and compiled
 # (sqlx-core, nzb-web dev); no default features.
 futures-util = { version = "0.3", default-features = false }
 # Already in the lockfile via sqlx; used to verify blob content against its address.

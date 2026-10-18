@@ -1,4 +1,4 @@
-//! Conformance of the storage seam (ARCHITECTURE v3 13.1/13.2, review 34 I2 c): the same calls through
+//! Conformance of the storage seam (ARCHITECTURE 13.1/13.2, review 34 I2 c): the same calls through
 //! [`Store`] on both backends give the same results and the **same** [`StoreError`] variant, so the web layer maps
 //! each condition to one uniform answer whatever the backend. Every test body is generic over the repository traits
 //! and instantiated twice (`sqlite::<name>`, `postgres::<name>`).

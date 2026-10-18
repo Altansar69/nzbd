@@ -1,11 +1,10 @@
 # Install nzbd in production
 
-From a bare Docker host to a running, secured instance. About 30 minutes. The guided way is [QUICK_INSTALL.md](QUICK_INSTALL.md) (`deploy/install.sh` does steps 1-8 below interactively, and can use your existing Traefik/nginx/Caddy instead of the bundled proxy). Upgrading an existing install: [RUNBOOK.md](RUNBOOK.md) section 5.
+From a bare Docker host to a running, secured instance. About 30 minutes. The guided way is [QUICK_INSTALL.md](QUICK_INSTALL.md) (`deploy/install.sh` does steps 1-8 below interactively, and can use your existing Traefik/nginx/Caddy instead of the bundled proxy). Updating an existing install: [RUNBOOK.md](RUNBOOK.md) section 5.
 
-**nzbd 3 starts a new library.** It does not upgrade a 2.x (or older) database: such a file is refused
-(`LEGACY_DATABASE`) and never modified. Install v3 into a **new data directory**; to bring NZB files over, copy them into
-the new watch folder or use `nzbd import <dir>` ([RUNBOOK.md](RUNBOOK.md) section 5, "Refill a new library"). The installer detects a
-2.x install next to it and never reuses its data directory.
+**nzbd starts a new library.** It does not upgrade a database written by an earlier private version: such a file is
+refused (`LEGACY_DATABASE`) and never modified. Install into a **new data directory**; to bring NZB files over, copy them
+into the new watch folder or use `nzbd import <dir>` ([RUNBOOK.md](RUNBOOK.md) section 5, "Refill a new library").
 
 **Choose the database once** (it cannot be switched later in 0.5):
 
@@ -49,7 +48,7 @@ Edit `deploy/.env`:
 | `NZBD_PROXY_HASH` | bcrypt hash of the proxy password, **single-quoted** (it contains `$`). | none (required) |
 | `NZBD_BIND` | Host address to publish on. Use the LAN IP of this host; never `0.0.0.0` on a host that faces the internet. | `127.0.0.1` |
 | `NZBD_HTTPS_PORT` | Published HTTPS port. | `443` |
-| `NZBD_DATA_DIR` | Host directory with the library, search index and (SQLite) database (bind mount). A **new** directory for v3: never the data directory of a 2.x install. | `deploy/data` (set an **absolute** path here: the template lives in `deploy/compose-example/`) |
+| `NZBD_DATA_DIR` | Host directory with the library, search index and (SQLite) database (bind mount). Use a **new** directory. | `deploy/data` (set an **absolute** path here: the template lives in `deploy/compose-example/`) |
 | `NZBD_DB_BACKEND` | `sqlite` or `postgres`; chosen once, never switched for an existing library. | `sqlite` |
 | `NZBD_NAME_PREFIX` | Optional prefix of the named volumes and long-running containers (`<prefix>_secrets`, `<prefix>`, `<prefix>-proxy`, `<prefix>-db`); lowercase letters, digits, `_`, `-`. Only for a second stack on one host. | `nzbd` |
 | `NZBD_UID`, `NZBD_GID` | The numeric user and group nzbd runs as (`nzbd`, `keygen`, `setup`); the data directory and the key volumes belong to it. Use a dedicated account (`id -u`, `id -g` of it) to manage `data/` without sudo; do not share the ids of other containers (media apps often run as 1000:1000). 1 to 2147483646; not 0 (root), 999 (PostgreSQL's superuser by peer authentication), 65532 (the proxy) or 65534 (nobody). With rootless Docker or userns-remap use `10001:10001` (a container UID is not your host account there). Choose it for a fresh install: existing key volumes of another user are refused, never re-owned. | required (the installer proposes your own IDs) |

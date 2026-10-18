@@ -1,4 +1,4 @@
-//! Test harness: one private database per test, copied from a migrated template (ARCHITECTURE v3 section 11).
+//! Test harness: one private database per test, copied from a migrated template (ARCHITECTURE section 11).
 //!
 //! The server is the ephemeral Postgres that `scripts/dev` starts next to the dev container (service `pg` of
 //! `compose.dev.yaml`): no network at all, reached through its Unix socket only, data on a tmpfs, removed after the

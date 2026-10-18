@@ -228,7 +228,7 @@ async fn sec_050_trash_release_checked_as_refuses_a_reused_rowid() {
     let id = e.release(1, &Uploader::Unattributed).await.unwrap();
     let old = e.db.get_release(id).await.unwrap().unwrap().sha256;
     // The old release is deleted elsewhere and a different NZB comes back under the same id. v3 never reuses ids
-    // from its sequence; restoring an older backup can (DATA_MODEL v3 section 1), so the restore is simulated by the
+    // from its sequence; restoring an older backup can (DATA_MODEL section 1), so the restore is simulated by the
     // superuser inserting the other NZB with that id.
     e.db.delete_release(id).await.unwrap();
     e.superuser_exec(&format!(

@@ -1,4 +1,4 @@
-//! The storage seam (ARCHITECTURE v3 13.1, T122): four domain traits implemented by both backends
+//! The storage seam (ARCHITECTURE 13.1, T122): four domain traits implemented by both backends
 //! ([`SqliteDb`], [`PgDb`]) and by the [`Store`] enum that production code holds. The indexer's contract is
 //! the merged `nzb_search::IndexSource` (review 34 L4), implemented on [`Store`] in `nzb-search`; it is not
 //! redefined here.
@@ -615,7 +615,7 @@ repo! {
 repo! {
     /// Releases, files, attribution, edits, bulk edits, trash, ingest log, library totals.
     pub trait LibraryRepo {
-        // --- Search index source (ARCHITECTURE v3 3.1-3.5; adapted to `nzb_search::IndexSource`, `Hydrator` and
+        // --- Search index source (ARCHITECTURE 3.1-3.5; adapted to `nzb_search::IndexSource`, `Hydrator` and
         // `DegradedSource` on `Store` by `nzb-search`).
         /// The oldest `limit` outbox rows, ascending sequence.
         fn search_outbox_read(&self, limit: usize) -> Result<Vec<OutboxEntry>, StoreError>;

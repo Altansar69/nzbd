@@ -1,4 +1,4 @@
-//! Hostile request -> Tantivy [`Query`], built by our code only (SEC-089, `docs/v3/DATA_MODEL.md` 5.3).
+//! Hostile request -> Tantivy [`Query`], built by our code only (SEC-089, `docs/DATA_MODEL.md` 5.3).
 //!
 //! * Text is cut to [`MAX_Q_CHARS`] characters and analyzed by the indexing analyzer; at most
 //!   [`MAX_Q_TOKENS`] tokens are kept. Every operator or syntax character is a separator, so no input

@@ -208,7 +208,7 @@ body.bare main { padding-top: var(--sp-4); }
 .alert { color: var(--bad); font-weight: 600; }
 .notice { color: var(--ok); font-weight: 600; }
 
-/* Stat tiles of the index (T129, owner request 2026-10-17; 3.1 had a one-line summary instead). Flat neutral panels
+/* Stat tiles of the index. Flat neutral panels
    (--tile-* tokens, AA-checked by the palette unit test), one row on desktop; compact on phones so the search box stays
    on the first screen. No accent stripe: green is reserved for "active / OK". */
 ul.tiles.plain { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: var(--sp-3); margin: 0 0 var(--sp-3); }

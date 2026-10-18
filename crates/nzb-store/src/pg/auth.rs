@@ -89,7 +89,7 @@ impl PgDb {
         s: &NewSession,
         max_per_stage: u32,
     ) -> Result<(), StoreError> {
-        // The per-user cap is an account-domain rule (ARCHITECTURE v3 section 6, SEC-024).
+        // The per-user cap is an account-domain rule (ARCHITECTURE section 6, SEC-024).
         let mut tx = self.begin_account().await?;
         insert_in_tx(&mut tx, s, max_per_stage, false).await?;
         tx.commit().await?;

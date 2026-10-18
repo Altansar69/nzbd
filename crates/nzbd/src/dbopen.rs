@@ -1,4 +1,4 @@
-//! Opening the configured backend (`db.backend`, ARCHITECTURE v3 13.1/13.5). The only place in `nzbd` that names
+//! Opening the configured backend (`db.backend`, ARCHITECTURE 13.1/13.5). The only place in `nzbd` that names
 //! both backends' constructors; everything else holds a [`Store`].
 //!
 //! * SQLite: `paths.db`, created and migrated on open (fresh 3.x library) or refused (`LEGACY_DATABASE` for a 2.x

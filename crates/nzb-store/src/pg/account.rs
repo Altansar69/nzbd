@@ -1,7 +1,7 @@
 //! Accounts, roles, display names and audit attribution on Postgres (T112; 2.x `account.rs`, SEC-060..SEC-068).
 //!
 //! Same rules and the same public API as the 2.x module; the 2.x single writer (`BEGIN IMMEDIATE`) becomes the
-//! account-domain advisory lock taken first in every mutating transaction ([`PgDb::begin_account`], ARCHITECTURE v3
+//! account-domain advisory lock taken first in every mutating transaction ([`PgDb::begin_account`], ARCHITECTURE
 //! section 6), and the last-admin trigger takes the same lock itself. Audit rows are appended last
 //! ([`crate::pg::audit::append`]), so the audit class lock is the last lock of every transaction.
 

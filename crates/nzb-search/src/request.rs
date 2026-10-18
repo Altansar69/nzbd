@@ -1,4 +1,4 @@
-//! v3 request and result types (ARCHITECTURE v3 3.5 item 4). The 2.x [`SearchQuery`] is carried as is;
+//! v3 request and result types (ARCHITECTURE 3.5 item 4). The 2.x [`SearchQuery`] is carried as is;
 //! the v3 additions are server-chosen values, never syntax.
 
 use nzb_core::Taxonomy;

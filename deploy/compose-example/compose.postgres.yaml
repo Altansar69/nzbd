@@ -1,7 +1,7 @@
 # PostgreSQL backend (installer question "Database", answer 2; docs/DEPLOYMENT.md "Choosing a backend"). Merged by
 # deploy/install.sh on top of compose.yaml into the self-contained deploy/compose.yaml; never run on its own.
 #
-# What it adds (docs/v3/ARCHITECTURE.md 8, 8.1, 9; SECURITY_REVIEW 30 M1/M4/I3):
+# What it adds (ARCHITECTURE 8, 8.1, 9):
 #   postgres   digest-pinned PostgreSQL 18, NO network at all (network_mode: none, so no port exists to publish or
 #              reach); nzbd talks to it over the Unix socket in the `pg_socket` volume, mounted read-only into nzbd.
 #              Non-root (the image's uid 999), read-only root filesystem, every capability dropped, memory/CPU/pids
@@ -83,7 +83,7 @@ services:
       retries: 30
       start_period: 120s
     stop_grace_period: 60s          # the image stops with SIGINT (fast shutdown); a checkpoint can take a while
-    # ~1M releases (docs/v3/PERFORMANCE.md 7.3): shared_buffers 1GB inside a 2 GiB limit. Never unlimited (Q7).
+    # ~1M releases (PERFORMANCE 7.3): shared_buffers 1GB inside a 2 GiB limit. Never unlimited (Q7).
     deploy:
       resources:
         limits: { memory: 2g, cpus: "2.0", pids: 128 }

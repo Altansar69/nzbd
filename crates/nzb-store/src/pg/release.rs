@@ -1,5 +1,5 @@
 //! Releases, files, attribution, trash and category statistics on Postgres (T112; 2.x `release.rs`,
-//! `attribution.rs`, `trash.rs`; `DATA_MODEL` v3 sections 3.1, 7; ARCHITECTURE v3 sections 3.1, 6).
+//! `attribution.rs`, `trash.rs`; `DATA_MODEL` v3 sections 3.1, 7; ARCHITECTURE sections 3.1, 6).
 //!
 //! Every transaction that creates a release, changes an indexed field of one or removes one also writes, in the SAME
 //! transaction, one `search_outbox` row per release (payload-free: the indexer reads the current state, SEC-092), the
@@ -196,7 +196,7 @@ impl StatDelta {
 }
 
 /// Applies `deltas` to `category_stats`: merged per category, rows locked in ascending category id first (lock order
-/// 3 of ARCHITECTURE v3 section 6, so two writers never wait on each other in opposite orders), then one array-bound
+/// 3 of ARCHITECTURE section 6, so two writers never wait on each other in opposite orders), then one array-bound
 /// `UPDATE`.
 pub(crate) async fn apply_stats(
     conn: &mut PgConnection,
@@ -242,7 +242,7 @@ pub(crate) async fn apply_stats(
 }
 
 /// Announces changed (or removed) releases to the search indexer: one payload-free outbox row each, in the caller's
-/// transaction (ARCHITECTURE v3 section 3.1, SEC-092). `enqueued_at` is the database clock (the lag metric's).
+/// transaction (ARCHITECTURE section 3.1, SEC-092). `enqueued_at` is the database clock (the lag metric's).
 pub(crate) async fn enqueue_outbox(conn: &mut PgConnection, ids: &[i64]) -> Result<(), StoreError> {
     if ids.is_empty() {
         return Ok(());
@@ -606,7 +606,7 @@ impl PgDb {
         }
     }
 
-    /// One ingest **commit group** (ARCHITECTURE v3 5, T114) in one transaction on the `ingest` pool: (a) every
+    /// One ingest **commit group** (ARCHITECTURE 5, T114) in one transaction on the `ingest` pool: (a) every
     /// distinct uploader re-validated and share-locked until the commit (N9; a refused one fails just its jobs),
     /// (b) one array-bound `INSERT ... SELECT FROM unnest(...) WITH ORDINALITY ... ORDER BY ord ON CONFLICT (sha256)
     /// DO NOTHING RETURNING` for the release rows (the unique index arbitrates races; rows explicitly in digest order,
@@ -1040,7 +1040,7 @@ impl PgDb {
         row.as_ref().map(release_from_row).transpose()
     }
 
-    /// Hydration for the search index (ARCHITECTURE v3 section 3.4): the rows of `ids` in the order given, one
+    /// Hydration for the search index (ARCHITECTURE section 3.4): the rows of `ids` in the order given, one
     /// primary-key statement; ids that no longer exist and rows whose CURRENT category is in `exclude` are dropped
     /// (SEC-090: the index may lag, the display rule never does).
     ///
@@ -1076,7 +1076,7 @@ impl PgDb {
         Ok(out)
     }
 
-    /// Degraded listing while the index is unavailable (ARCHITECTURE v3 section 3.3, review L5): newest first by
+    /// Degraded listing while the index is unavailable (ARCHITECTURE section 3.3, review L5): newest first by
     /// primary key below `before` (exclusive), restricted to `categories` (empty = all; a parent id is passed
     /// together with its children by the caller) and outside `exclude`, walking at most [`DEGRADED_SCAN_BUDGET`]
     /// primary-key entries per request.
@@ -1692,7 +1692,7 @@ impl PgDb {
     }
 
     /// Announces releases to the search indexer without changing them (the `SearchIndex::upsert`/`remove`
-    /// reconciliation hook and `nzbd search verify --repair`, ARCHITECTURE v3 section 3.5). Ids are not checked: a
+    /// reconciliation hook and `nzbd search verify --repair`, ARCHITECTURE section 3.5). Ids are not checked: a
     /// row for a vanished id makes the indexer delete its document.
     ///
     /// # Errors

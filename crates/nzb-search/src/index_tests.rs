@@ -395,7 +395,7 @@ fn sec_090_category_moved_into_hidden_is_not_rendered_during_index_lag() {
             [6, 5, 3, 1]
         );
         assert_eq!(p.dropped, 2);
-        // Accepted lag effect (ARCHITECTURE v3 3.5): the total may still count them for one cycle.
+        // Accepted lag effect (ARCHITECTURE 3.5): the total may still count them for one cycle.
         assert_eq!(p.total, Total::Exact(6));
     });
 }

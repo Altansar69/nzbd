@@ -9,7 +9,7 @@
 //! (advisory next to a cursor, authoritative without one) and the jump-to-page / last-page path, which
 //! is an offset query. A malformed cursor is a `400 BAD_QUERY` like any other bad parameter.
 //!
-//! v3 search contract (T123, ARCHITECTURE v3 3.5): the listing goes through [`SearchIndexV3`] with prefix matching
+//! v3 search contract (T123, ARCHITECTURE 3.5): the listing goes through [`SearchIndexV3`] with prefix matching
 //! on the last word and the fuzzy fallback for a text query without an exact hit (D35 Q5), totals that may be a
 //! lower bound ("more than n", Q1), numbered (offset) pages capped by the engine at 100,000 rows (Q2: a page beyond
 //! the cap that is not near the end is the uniform `400 BAD_QUERY`; keyset Next/Previous and Last are unaffected),
@@ -1170,7 +1170,7 @@ pub const NOTICE_NARROWED: &str = "Search narrowed: a word matched too many inde
 of them was searched. Type more of the word for complete results.";
 /// The fuzzy fallback produced the page (no exact hit, D35 Q5). The approximate terms are never shown.
 pub const NOTICE_APPROXIMATE: &str = "No exact matches. Showing approximate matches.";
-/// Degraded browse (ARCHITECTURE v3 3.3).
+/// Degraded browse (ARCHITECTURE 3.3).
 pub const NOTICE_DEGRADED: &str = "The search index is being rebuilt. Until it is ready this list shows \
 the newest releases only; search, sorting and filters other than category are not available.";
 /// Degraded browse with a search, sort or filter other than category.
@@ -1433,7 +1433,7 @@ async fn search_listing<S: SearchIndexV3>(
     })
 }
 
-/// The bounded degraded browse (ARCHITECTURE v3 3.3, review L5): newest first, category only.
+/// The bounded degraded browse (ARCHITECTURE 3.3, review L5): newest first, category only.
 async fn degraded_listing(
     db: &Store,
     tax: &Taxonomy,
