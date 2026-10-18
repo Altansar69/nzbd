@@ -215,6 +215,24 @@ fn row_to_login(r: &sqlx::sqlite::SqliteRow) -> Result<LoginUser, StoreError> {
 
 /// Inserts `s` and applies the per-user, per-stage cap. `enroll_proven` marks a pending session that
 /// already proved possession of an out-of-band invite/recovery code (0011).
+/// Whether `id_hash` is still an `active` session of `account_id`. Every revocation (recovery, reset, role change,
+/// disable, explicit revoke) deletes the row, so this is how a writer learns that the session which re-authenticated
+/// the request died meanwhile.
+pub(crate) async fn session_is_live(
+    conn: &mut sqlx::SqliteConnection,
+    id_hash: &[u8; 32],
+    account_id: i64,
+) -> Result<bool, StoreError> {
+    let live: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM session WHERE id_hash = ?1 AND account_id = ?2 AND stage = 'active'",
+    )
+    .bind(id_hash.as_slice())
+    .bind(account_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(live.is_some())
+}
+
 pub(crate) async fn insert_in_tx(
     tx: &mut sqlx::SqliteConnection,
     s: &NewSession,

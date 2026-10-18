@@ -285,6 +285,7 @@ impl SessionCtx {
     #[must_use]
     pub fn actor(&self) -> AccountActor {
         AccountActor {
+            session: Some(self.id_hash),
             user_id: self.user_id,
             role: self.role,
             username: self.username.clone(),

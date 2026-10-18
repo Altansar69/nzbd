@@ -1397,3 +1397,51 @@ async fn password_change_is_bound_to_the_reauthenticated_session() {
     assert!(e.db.get_session(&[72; 32]).await.unwrap().is_none());
     assert!(e.db.get_session(&[71; 32]).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn admin_credential_writers_are_bound_to_the_reauthenticated_session() {
+    let (e, _a, m, act) = world().await;
+    // The admin's session died after the re-authentication (a recovery, reset or revocation): no
+    // invitation, no recovery code, no account action.
+    let dead = AccountActor {
+        session: Some([95; 32]),
+        ..act.clone()
+    };
+    let h = code(30).hash();
+    let r =
+        e.db.create_invite(
+            &dead,
+            &NewInvite {
+                username: "late",
+                role: GrantableRole::Viewer,
+                code_hash: &h,
+                ttl_secs: 3600,
+            },
+            POLICY,
+            None,
+            T0,
+        )
+        .await;
+    assert_eq!(err_code(r), "FORBIDDEN");
+    let h = code(31).hash();
+    let r =
+        e.db.issue_recovery(
+            &dead,
+            &NewRecovery {
+                target_id: m,
+                code_hash: &h,
+                ttl_secs: 3600,
+            },
+            None,
+            T0,
+        )
+        .await;
+    assert_eq!(err_code(r), "FORBIDDEN");
+    assert_eq!(e.count("invite", "1=1").await, 0);
+    // With the session alive, the same writer works.
+    e.db.insert_session(&sess(act.user_id, 95, SessionStage::Active, T0), 5)
+        .await
+        .unwrap();
+    recover(&e, &dead, m, 32, T0).await;
+    assert_eq!(e.count("invite", "1=1").await, 1);
+}

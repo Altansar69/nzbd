@@ -189,18 +189,10 @@ impl PgDb {
         require_actor(&mut tx, owner_id, Role::Uploader)
             .await
             .map_err(|_| StoreError::from(AccountError::Forbidden))?;
-        if let Some(h) = session_hash {
-            let live: Option<i32> = sqlx::query_scalar(
-                "SELECT 1 FROM session WHERE id_hash = $1 AND account_id = $2                  AND stage = 'active' AND expires_at > $3",
-            )
-            .bind(h.as_slice())
-            .bind(owner_id)
-            .bind(now)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if live.is_none() {
-                return Err(StoreError::NotFound);
-            }
+        if let Some(h) = session_hash
+            && !crate::pg::auth::session_is_live(&mut tx, h, owner_id).await?
+        {
+            return Err(StoreError::NotFound);
         }
         let Some(id) = insert_key(&mut tx, key, &label, Some(owner_id), max_active, now).await?
         else {

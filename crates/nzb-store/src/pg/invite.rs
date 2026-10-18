@@ -16,8 +16,8 @@ use crate::invite::{
 use crate::pg::PgDb;
 use crate::pg::account::{
     confusable_display_name_in_use, count_live, display_name_in_use, insert_account_with,
-    load_live, login_name_in_use, open_invite_for_name, require_actor, write_audit,
-    write_audit_throttled,
+    load_live, login_name_in_use, open_invite_for_name, require_actor, require_session_actor,
+    write_audit, write_audit_throttled,
 };
 use crate::pg::auth::insert_in_tx;
 use crate::profile::{RegistrationProfile, normalize_email, self_display_name_is_valid};
@@ -142,7 +142,7 @@ impl PgDb {
         now: i64,
     ) -> Result<i64, StoreError> {
         let mut tx = self.begin_account().await?;
-        let a = require_actor(&mut tx, actor.user_id, Role::Admin).await?;
+        let a = require_session_actor(&mut tx, actor, Role::Admin).await?;
         let id = create_invite_in(
             &mut tx,
             Some(a.id),
@@ -284,7 +284,7 @@ impl PgDb {
         now: i64,
     ) -> Result<i64, StoreError> {
         let mut tx = self.begin_account().await?;
-        let a = require_actor(&mut tx, actor.user_id, Role::Admin).await?;
+        let a = require_session_actor(&mut tx, actor, Role::Admin).await?;
         if a.id == new.target_id {
             return Err(AccountError::SelfTarget.into());
         }

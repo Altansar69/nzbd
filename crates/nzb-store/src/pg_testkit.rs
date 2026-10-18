@@ -97,6 +97,7 @@ impl Env {
             display_name: a.handle(),
             stage: SessionStage::Active,
             prefs: crate::UserPrefs::default(),
+            session: None,
         }
     }
 

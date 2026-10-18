@@ -64,6 +64,22 @@ pub(crate) async fn require_actor(
     }
 }
 
+/// [`require_actor`] for an actor built from a session: that session must also still exist (a recovery, reset,
+/// revocation or role change deletes it), so a re-authenticated write never outlives the session that proved it.
+pub(crate) async fn require_session_actor(
+    conn: &mut PgConnection,
+    actor: &AccountActor,
+    min: Role,
+) -> Result<Subject, StoreError> {
+    let s = require_actor(conn, actor.user_id, min).await?;
+    if let Some(h) = &actor.session
+        && !crate::pg::auth::session_is_live(conn, h, actor.user_id).await?
+    {
+        return Err(AccountError::Forbidden.into());
+    }
+    Ok(s)
+}
+
 /// Appends an audit row on `conn` (same transaction as the change it describes).
 pub(crate) async fn write_audit(
     conn: &mut PgConnection,
@@ -476,7 +492,7 @@ async fn resolve(conn: &mut PgConnection, init: Initiator<'_>) -> Result<Resolve
             actor_id: None,
         }),
         Initiator::Account(a) => {
-            let s = require_actor(conn, a.user_id, Role::Admin).await?;
+            let s = require_session_actor(conn, a, Role::Admin).await?;
             Ok(Resolved {
                 who: AuditActor::account(s.id, s.role, &s.username),
                 actor_id: Some(s.id),
@@ -532,6 +548,7 @@ impl PgDb {
                 _ => return Err(StoreError::OutOfRange("session stage")),
             };
             Ok(AccountActor {
+                session: Some(*id_hash),
                 user_id: id,
                 role: role_from(&r.try_get::<String, _>("role")?)?,
                 username: r.try_get("username")?,

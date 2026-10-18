@@ -517,9 +517,18 @@ struct Ctx {
     ident: Option<fsops::SourceIdent>,
     /// Test-only: an injected crash happened; skip failure handling (a dead process does none).
     crashed: bool,
-    /// The parser panicked: counted like a panicking job, so the file is quarantined after
-    /// [`MAX_PANICS`] instead of being retried forever.
+    /// A blocking step (read, parse) or the job's own commit panicked: counted like a panicking
+    /// job, so the file is quarantined after [`MAX_PANICS`] instead of being retried forever.
     panicked: bool,
+}
+
+/// The result of a blocking task of a job; a panic in it marks the job as panicked (see
+/// [`Ctx::panicked`]), so hostile input that panics is quarantined instead of retried forever.
+fn joined<T>(r: Result<T, tokio::task::JoinError>, ctx: &mut Ctx) -> Result<T, IngestError> {
+    r.map_err(|e| {
+        ctx.panicked |= e.is_panic();
+        IngestError::Internal
+    })
 }
 
 /// The outcome of a group transaction of exactly one job.
@@ -736,7 +745,7 @@ impl Pipeline {
                 // failure (INTERNAL, bounded retry, then quarantine).
                 Err(_) => {
                     drop(permit);
-                    let _ = reply.send(Err(self.fail_panicked(&meta).await));
+                    let _ = reply.send(Err(self.fail_panicked(&meta, None, None).await));
                 }
             }
             self.inner.in_prep.fetch_sub(1, Ordering::SeqCst);
@@ -779,7 +788,7 @@ impl Pipeline {
                     let q = p.clone();
                     let r = match tokio::spawn(async move { q.finish(ready, c).await }).await {
                         Ok(r) => r,
-                        Err(_) => Err(p.fail_panicked(&meta).await),
+                        Err(_) => Err(p.fail_panicked(&meta, None, None).await),
                     };
                     if let Some(tx) = reply {
                         let _ = tx.send(r);
@@ -889,7 +898,9 @@ impl Pipeline {
             return e;
         }
         if ctx.panicked {
-            return self.fail_panicked(&job.meta()).await;
+            return self
+                .fail_panicked(&job.meta(), ctx.sha, ctx.ident.take())
+                .await;
         }
         if !ctx.crashed {
             self.fail(&job.meta(), ctx.sha, ctx.ident.take(), &e, 0)
@@ -899,11 +910,10 @@ impl Pipeline {
     }
 
     /// Step 6 for a group: one transaction ([`nzb_store::LibraryRepo::insert_release_group`]).
-    /// When the whole group fails (not one job: I/O, a lost connection, a deadlock), each job is
-    /// retried alone, so one bad job never fails the others (ARCHITECTURE 5). A panic is contained
-    /// the same way: the group (whose transaction rolled back) is committed one job at a time, and
-    /// a job that panics alone is counted like a panicking job (quarantined after [`MAX_PANICS`])
-    /// instead of taking the writer, and with it the process, down.
+    /// When the whole group fails (not one job: I/O, a lost connection, a deadlock) or panics, each
+    /// job is retried alone, so one bad job never fails the others (ARCHITECTURE 5). A job whose own
+    /// transaction panics is counted like a panicking job (quarantined after [`MAX_PANICS`]) instead
+    /// of taking the writer, and with it the process, down.
     pub(crate) async fn commit(
         &self,
         mut group: Vec<Ready>,
@@ -919,68 +929,70 @@ impl Pipeline {
             }
             return group.into_iter().map(|r| (r, Committed::Crashed)).collect();
         }
-        let caught = AssertUnwindSafe(self.commit_outcomes(&group, hold))
-            .catch_unwind()
-            .await;
-        let outcomes = if let Ok(v) = caught {
-            v
-        } else {
-            tracing::error!(
-                jobs = group.len(),
-                "commit group panicked; committing its jobs one by one"
-            );
-            let now = self.now();
-            let mut one_by_one = Vec::with_capacity(group.len());
-            for r in &mut group {
-                let item = [r.item(now)];
-                let caught = AssertUnwindSafe(self.insert_group(&item, hold))
-                    .catch_unwind()
-                    .await;
-                one_by_one.push(if let Ok(res) = caught {
-                    committed_one(res)
-                } else {
-                    r.ctx.panicked = true;
-                    Committed::Failed(IngestError::Internal)
-                });
-            }
-            one_by_one
-        };
+        let outcomes = self.commit_outcomes(&mut group, hold).await;
         group.into_iter().zip(outcomes).collect()
     }
 
-    /// The outcome of each job of `group`, in order (one group transaction, then one by one when
-    /// the whole group fails).
-    async fn commit_outcomes(&self, group: &[Ready], hold: Duration) -> Vec<Committed> {
+    /// The outcome of each job of `group`, in order (see [`Pipeline::commit`]).
+    async fn commit_outcomes(&self, group: &mut [Ready], hold: Duration) -> Vec<Committed> {
         let now = self.now();
         self.inner
             .counters
             .commit_groups
             .fetch_add(1, Ordering::Relaxed);
-        let outcomes = {
+        let whole = {
             let items: Vec<GroupItem<'_>> = group.iter().map(|r| r.item(now)).collect();
-            self.insert_group(&items, hold).await
+            self.insert_caught(&items, hold).await
         };
-        match outcomes {
-            Ok(v) if v.len() == group.len() => v.into_iter().map(Committed::from).collect(),
-            Ok(_) => group
-                .iter()
-                .map(|_| Committed::Failed(IngestError::Internal))
-                .collect(),
-            Err(e) if group.len() == 1 => vec![Committed::Failed(uploader_error(e))],
-            Err(e) => {
-                tracing::warn!(
-                    jobs = group.len(),
-                    error = %e,
-                    "commit group failed; committing its jobs one by one"
-                );
-                let mut one_by_one = Vec::with_capacity(group.len());
-                for r in group {
-                    let item = [r.item(now)];
-                    one_by_one.push(committed_one(self.insert_group(&item, hold).await));
-                }
-                one_by_one
+        match whole {
+            Some(Ok(v)) if v.len() == group.len() => {
+                return v.into_iter().map(Committed::from).collect();
             }
+            Some(Ok(_)) => {
+                return group
+                    .iter()
+                    .map(|_| Committed::Failed(IngestError::Internal))
+                    .collect();
+            }
+            Some(Err(e)) if group.len() == 1 => return vec![Committed::Failed(uploader_error(e))],
+            Some(Err(e)) => tracing::warn!(
+                jobs = group.len(),
+                error = %e,
+                "commit group failed; committing its jobs one by one"
+            ),
+            None => tracing::error!(
+                jobs = group.len(),
+                "commit group panicked; committing its jobs one by one"
+            ),
         }
+        let mut one_by_one = Vec::with_capacity(group.len());
+        for r in group.iter_mut() {
+            let res = {
+                let item = [r.item(now)];
+                self.insert_caught(&item, hold).await
+            };
+            one_by_one.push(res.map_or_else(
+                || {
+                    r.ctx.panicked = true;
+                    Committed::Failed(IngestError::Internal)
+                },
+                committed_one,
+            ));
+        }
+        one_by_one
+    }
+
+    /// [`Pipeline::insert_group`] with a panic contained: `None` when it panicked (an unfinished
+    /// transaction is rolled back when it is dropped).
+    async fn insert_caught(
+        &self,
+        items: &[GroupItem<'_>],
+        hold: Duration,
+    ) -> Option<Result<Vec<GroupOutcome>, StoreError>> {
+        AssertUnwindSafe(self.insert_group(items, hold))
+            .catch_unwind()
+            .await
+            .ok()
     }
 
     /// One group transaction (the test build can make a multi-job group fail as a whole once, or
@@ -1114,7 +1126,12 @@ impl Pipeline {
 
     /// A job panicked: log it as `INTERNAL` and count it; the third panic of the same watch
     /// path quarantines the file so it cannot loop forever.
-    async fn fail_panicked(&self, meta: &JobMeta) -> IngestError {
+    async fn fail_panicked(
+        &self,
+        meta: &JobMeta,
+        sha: Option<Sha256>,
+        ident: Option<fsops::SourceIdent>,
+    ) -> IngestError {
         let panics = meta.path.as_ref().map_or(MAX_PANICS, |p| {
             self.attempts_mut(|m| {
                 let a = m.entry(p.clone()).or_default();
@@ -1123,7 +1140,7 @@ impl Pipeline {
             })
         });
         tracing::error!("ingest job panicked");
-        self.fail(meta, None, None, &IngestError::Internal, panics)
+        self.fail(meta, sha, ident, &IngestError::Internal, panics)
             .await;
         IngestError::Internal
     }
@@ -1169,7 +1186,7 @@ impl Pipeline {
     }
 
     /// Step 1: bounded read + hash, off the async threads.
-    async fn load(&self, job: &mut Job) -> Result<Loaded, IngestError> {
+    async fn load(&self, job: &mut Job, ctx: &mut Ctx) -> Result<Loaded, IngestError> {
         let max = self.inner.cfg.limits.max_file_bytes;
         match &mut job.payload {
             Payload::Bytes(b) => {
@@ -1177,7 +1194,7 @@ impl Pipeline {
                     return Err(IngestError::FileTooLarge);
                 }
                 let bytes = std::mem::take(b);
-                tokio::task::spawn_blocking(move || {
+                let r = tokio::task::spawn_blocking(move || {
                     let sha = fsops::digest(&bytes);
                     Loaded {
                         bytes,
@@ -1185,24 +1202,25 @@ impl Pipeline {
                         ident: None,
                     }
                 })
-                .await
-                .map_err(|_| IngestError::Internal)
+                .await;
+                joined(r, ctx)
             }
             Payload::Staged(path) => {
                 let path = path.clone();
-                tokio::task::spawn_blocking(move || fsops::read_source(&path, max, None, None))
-                    .await
-                    .map_err(|_| IngestError::Internal)?
+                let r =
+                    tokio::task::spawn_blocking(move || fsops::read_source(&path, max, None, None))
+                        .await;
+                joined(r, ctx)?
             }
             Payload::Watch(c) => {
                 let path = c.path.clone();
                 let id = c.id.clone();
                 let root = self.inner.cfg.watch_dir.clone();
-                tokio::task::spawn_blocking(move || {
+                let r = tokio::task::spawn_blocking(move || {
                     fsops::read_source(&path, max, Some(&id), Some(&root))
                 })
-                .await
-                .map_err(|_| IngestError::Internal)?
+                .await;
+                joined(r, ctx)?
             }
             Payload::Import(f) => {
                 // The descriptor was opened by the walk (no-follow, regular file); read it once.
@@ -1211,9 +1229,10 @@ impl Pipeline {
                     .try_clone()
                     .map_err(|_| IngestError::SourceUnreadable)?;
                 let size = f.size;
-                tokio::task::spawn_blocking(move || fsops::read_opened(file, size, max, || {}))
-                    .await
-                    .map_err(|_| IngestError::Internal)?
+                let r =
+                    tokio::task::spawn_blocking(move || fsops::read_opened(file, size, max, || {}))
+                        .await;
+                joined(r, ctx)?
             }
         }
     }
@@ -1260,7 +1279,7 @@ impl Pipeline {
         let inner = &self.inner;
         self.apply_watch_rules(job);
         // Step 1: bounded read + SHA-256.
-        let mut loaded = self.load(job).await?;
+        let mut loaded = self.load(job, ctx).await?;
         let sha = loaded.sha;
         ctx.sha = Some(sha);
         ctx.ident.clone_from(&loaded.ident);
@@ -1297,15 +1316,12 @@ impl Pipeline {
         let limits = inner.cfg.limits;
         let deadline = Instant::now() + limits.parse_deadline;
         let bytes = std::mem::take(&mut loaded.bytes);
-        let (bytes, analysed) = tokio::task::spawn_blocking(move || {
+        let r = tokio::task::spawn_blocking(move || {
             let r = analyze(&bytes, &limits, deadline);
             (bytes, r)
         })
-        .await
-        .map_err(|e| {
-            ctx.panicked = e.is_panic();
-            IngestError::Internal
-        })?;
+        .await;
+        let (bytes, analysed) = joined(r, ctx)?;
         loaded.bytes = bytes;
         let mut analysis = analysed?;
         if analysis.sha256 != sha {

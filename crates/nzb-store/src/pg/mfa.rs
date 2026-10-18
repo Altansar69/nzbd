@@ -425,15 +425,7 @@ impl PgDb {
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.begin_account().await?;
-        let live: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM session WHERE id_hash = $1 AND account_id = $2 AND stage = 'active'              AND expires_at > $3",
-        )
-        .bind(session_hash.as_slice())
-        .bind(user_id)
-        .bind(now)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if live.is_none() {
+        if !crate::pg::auth::session_is_live(&mut tx, session_hash, user_id).await? {
             return Err(StoreError::NotFound);
         }
         sqlx::query("DELETE FROM recovery_code WHERE account_id = $1")

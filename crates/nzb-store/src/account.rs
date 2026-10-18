@@ -232,6 +232,10 @@ pub struct AccountActor {
     pub stage: SessionStage,
     /// The account's own preferences (T120), read in the same statement as the session (no extra query).
     pub prefs: crate::UserPrefs,
+    /// `SHA-256` of the id of the session this actor was built from, if any. Writers acting on a re-authenticated
+    /// request require it to still exist, so a recovery, reset or revocation committed after the re-authentication
+    /// cannot be outrun.
+    pub session: Option<[u8; 32]>,
 }
 
 /// The identity recorded in an audit row (`actor`, `actor_id`, `actor_kind`, `actor_role`).
@@ -552,6 +556,22 @@ pub(crate) async fn require_actor(
         Some(s) if !s.disabled && s.role >= min => Ok(s),
         _ => Err(AccountError::Forbidden.into()),
     }
+}
+
+/// [`require_actor`] for an actor built from a session: that session must also still exist (a recovery, reset,
+/// revocation or role change deletes it), so a re-authenticated write never outlives the session that proved it.
+pub(crate) async fn require_session_actor(
+    conn: &mut SqliteConnection,
+    actor: &AccountActor,
+    min: Role,
+) -> Result<Subject, StoreError> {
+    let s = require_actor(conn, actor.user_id, min).await?;
+    if let Some(h) = &actor.session
+        && !crate::auth::session_is_live(conn, h, actor.user_id).await?
+    {
+        return Err(AccountError::Forbidden.into());
+    }
+    Ok(s)
 }
 
 /// Appends an audit row on `conn` (same transaction as the change it describes).
@@ -1021,7 +1041,7 @@ async fn resolve(conn: &mut SqliteConnection, init: Initiator<'_>) -> Result<Res
             actor_id: None,
         }),
         Initiator::Account(a) => {
-            let s = require_actor(conn, a.user_id, Role::Admin).await?;
+            let s = require_session_actor(conn, a, Role::Admin).await?;
             Ok(Resolved {
                 who: AuditActor::account(s.id, s.role, &s.username),
                 actor_id: Some(s.id),
@@ -1077,6 +1097,7 @@ impl SqliteDb {
                 _ => return Err(StoreError::OutOfRange("session stage")),
             };
             Ok(AccountActor {
+                session: Some(*id_hash),
                 user_id: id,
                 role: role_from(&r.try_get::<String, _>("role")?)?,
                 username: r.try_get("username")?,
