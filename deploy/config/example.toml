@@ -1,0 +1,38 @@
+# Example settings. install.sh copies it (every setting commented out) to deploy/config/nzbd.toml, which the compose
+# stack mounts read-only at /etc/nzbd/config.toml (NZBD_CONFIG_FILE). NZBD__section__key env vars override it.
+# Secrets are never put here; the TOTP key is a 0400 file in the nzbd_secrets volume (see DEPLOYMENT.md).
+[server]
+listen = "0.0.0.0:8080"
+trusted_proxies = ["172.30.0.2"]   # single IPs only; must equal the proxy's fixed address in compose.yaml
+allowed_hosts = ["nzbd.lan"]       # the site name the browser uses (NZBD_SITE); lowercase, no port. Others get 400 BAD_HOST
+insecure_cookies = false
+
+[paths]
+watch = "/data/watch"
+store = "/data/store"
+failed = "/data/failed"
+duplicates = "/data/duplicates"
+tmp = "/data/tmp"
+db = "/data/nzbd.sqlite"           # SQLite backend only
+backups = "/data/backups"
+state = "/state"                   # serve.lock + restore anchor, on its own volume (set by compose.yaml)
+
+[limits]
+max_file_bytes = 67108864   # keep Caddy request_body max_size >= this
+
+[security]
+totp_key_file = "/run/secrets/nzbd_totp_key"
+invite_path = "/invite"   # the invitation page (multi_user = true); a value like "/join-7f3k9q" hides it from scanners
+
+[ui]
+show_xxx = true   # false hides the XXX category and its children from every UI view (ingest unchanged); restart required
+
+[db]
+# backend = "sqlite" or "postgres" is set by deploy/compose.yaml (NZBD__db__backend, from the installer's choice) and
+# never changed for an existing library. The PostgreSQL connection (socket, roles, password file, pools) is set there too.
+startup_check = "fast"   # SQLite: "fast" | "quick" | "full" check before serving (pending migrations force "full")
+
+[search]
+max_concurrent_searches = 8   # more wait up to 1 s, then 503 BUSY
+query_deadline_ms = 2000
+fuzzy = "fallback"            # "off" | "fallback" (typo tolerance only when nothing matches) | "toggle"

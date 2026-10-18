@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<p><a href="/release/{{ id }}">Back to release</a></p>
+<h1>Segments of file {{ idx }}</h1>
+<p class="muted">{{ title }}</p>
+<p><code>{{ name }}</code></p>
+{% if health %}<p>Declared segments: {{ declared }}.{% if !ranges.is_empty() %} Missing: {{ ranges }}{% if !more_ranges.is_empty() %} ({{ more_ranges }}){% endif %}.{% endif %}</p>
+{% else %}<p>Segments: {{ segs }}.</p>
+<p class="muted">Availability on the news server is not checked yet; the list below shows the segments as they appear in the NZB.</p>
+{% endif %}
+{% include "segments_fragment.html" %}
+{% endblock %}

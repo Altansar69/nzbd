@@ -1,0 +1,47 @@
+[package]
+name = "nzbd"
+description = "nzbd binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# DEV ONLY helpers (`nzbd dev-totp`). Never enabled by the release Dockerfile.
+dev-tools = []
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1"] }
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive", "std"] }
+nzb-core = { version = "0.5.0", path = "../nzb-core" }
+nzb-ingest = { version = "0.5.0", path = "../nzb-ingest" }
+# The v3 search index (T113) for both backends: the indexer task in `serve` and `nzbd search ...`.
+nzb-search = { version = "0.5.0", path = "../nzb-search" }
+nzb-store = { version = "0.5.0", path = "../nzb-store" }
+nzb-web = { version = "0.5.0", path = "../nzb-web" }
+# No-echo TTY password prompt (needs termios; std has none and unsafe is forbidden here).
+rpassword = "7"
+# Safe `statvfs`/`access` for the health page's free-space and writability checks, and `geteuid` for the root
+# refusal of the CLI (review 39 L2; std has
+# neither). Already in the lockfile via tempfile; same version, no new package.
+rustix = { version = "1.1.5", default-features = false, features = ["fs", "process", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
+toml = "1.1.7"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "env-filter", "std", "ansi"] }
+zeroize = "1.9.1"
+
+[dev-dependencies]
+# Digests of the NZB fixtures written by the `nzbd import` test (already in the lockfile via nzb-ingest).
+sha2 = "0.10"
+# The Postgres test harness (`nzb_store::pg::testing`): library identity and backend tests on both backends (T122).
+nzb-store = { version = "0.5.0", path = "../nzb-store", features = ["pg-test-support"] }
+tempfile = "3.27.0"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }

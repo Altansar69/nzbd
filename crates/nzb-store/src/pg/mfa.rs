@@ -1,0 +1,599 @@
+//! MFA repository on Postgres (T112; 2.x `mfa.rs`, SEC-023, SEC-026, SEC-033): sealed TOTP secret, replay step,
+//! recovery codes, second-factor verdicts and the account page's session list. Every verdict runs under the
+//! account-domain lock with the lock state re-read inside it (2.x: one writer transaction).
+
+use sqlx::Row;
+
+use crate::StoreError;
+use crate::mfa::{FactorAttempt, MfaState, SecondFactor, SessionInfo, ct_eq32};
+use crate::pg::PgDb;
+use crate::pg::auth::bump_failure;
+
+async fn audit_tx(
+    tx: &mut sqlx::PgConnection,
+    now: i64,
+    actor: Option<&str>,
+    event: &str,
+    detail: Option<&str>,
+    ip: Option<&str>,
+) -> Result<(), StoreError> {
+    crate::pg::account::write_audit_legacy(tx, now, actor, event, detail, ip).await
+}
+
+/// Arms the enrollment token of one account (only while MFA is not enabled).
+async fn arm_enrollment_token(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+    token_hash: &[u8; 32],
+    expires_at: i64,
+    now: i64,
+) -> Result<bool, StoreError> {
+    let res = sqlx::query(
+        "UPDATE account SET enroll_token_hash = $2, enroll_token_expires = $3 \
+         WHERE id = $1 AND totp_enabled = false",
+    )
+    .bind(id)
+    .bind(token_hash.as_slice())
+    .bind(expires_at)
+    .execute(&mut *conn)
+    .await?;
+    let armed = res.rows_affected() > 0;
+    if armed {
+        crate::pg::user::revoke_recovery_state(conn, id, now).await?;
+        crate::pg::account::write_audit(
+            conn,
+            &crate::AuditActor::cli(),
+            now,
+            "user.enroll_token_issued",
+            None,
+            None,
+            Some(id),
+        )
+        .await?;
+    }
+    Ok(armed)
+}
+
+async fn username_of(
+    tx: &mut sqlx::PgConnection,
+    user_id: i64,
+) -> Result<Option<String>, StoreError> {
+    Ok(
+        sqlx::query_scalar("SELECT username FROM account WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?,
+    )
+}
+
+impl PgDb {
+    /// Arms enrollment: stores `SHA-256(token)` and its expiry for the only user, replacing any
+    /// earlier token. Returns `false` when TOTP is already enabled (nothing to enroll) and
+    /// `NotFound` when there is no user. Called by the CLI (`user create|reset-mfa|enroll-token`).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] without a user; database failure.
+    pub async fn set_enrollment_token(
+        &self,
+        token_hash: &[u8; 32],
+        expires_at: i64,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.begin_account().await?;
+        let id = crate::pg::user::only_live_user(&mut tx).await?;
+        let armed = arm_enrollment_token(&mut tx, id, token_hash, expires_at, now).await?;
+        tx.commit().await?;
+        Ok(armed)
+    }
+
+    /// Operator `user enroll-token <name>`: arms enrollment for one account (see
+    /// [`PgDb::set_enrollment_token`]). Also revokes the account's open recovery codes and drops its
+    /// staged swap (N4).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] without such a live account; database failure.
+    pub async fn set_enrollment_token_for(
+        &self,
+        user_id: i64,
+        token_hash: &[u8; 32],
+        expires_at: i64,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.begin_account().await?;
+        let live: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM account WHERE id = $1 AND deleted_at IS NULL")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if live.is_none() {
+            return Err(StoreError::NotFound);
+        }
+        let armed = arm_enrollment_token(&mut tx, user_id, token_hash, expires_at, now).await?;
+        tx.commit().await?;
+        Ok(armed)
+    }
+
+    /// Checks the enrollment token in one writer transaction (lock re-read, failure counted in the
+    /// shared lockout counter, audit row in every branch). The token is NOT consumed here.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn check_enrollment_token(
+        &self,
+        user_id: i64,
+        token_hash: Option<[u8; 32]>,
+        ip: Option<&str>,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.begin_account().await?;
+        let row = sqlx::query(
+            "SELECT username, totp_enabled, locked_until, enroll_token_hash, enroll_token_expires \
+             FROM account WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut exists = false;
+        let mut actor: Option<String> = None;
+        let mut locked = false;
+        let mut ok = false;
+        if let Some(r) = &row {
+            exists = true;
+            actor = Some(r.try_get("username")?);
+            locked = r
+                .try_get::<Option<i64>, _>("locked_until")?
+                .is_some_and(|l| l > now);
+            let stored: Option<Vec<u8>> = r.try_get("enroll_token_hash")?;
+            let expires: Option<i64> = r.try_get("enroll_token_expires")?;
+            let fresh = expires.is_some_and(|e| e > now);
+            let matches = match (&stored, &token_hash) {
+                (Some(s), Some(t)) => ct_eq32(s, t),
+                _ => false,
+            };
+            ok = !r.try_get::<bool, _>("totp_enabled")? && !locked && fresh && matches;
+        }
+        if !ok && exists && !locked {
+            bump_failure(&mut tx, user_id, now).await?;
+        }
+        let (event, detail) = if ok {
+            ("mfa.enroll_token_ok", "ok")
+        } else if locked {
+            ("mfa.fail", "purpose=enroll_token reason=locked")
+        } else {
+            ("mfa.fail", "purpose=enroll_token reason=bad_token")
+        };
+        audit_tx(&mut tx, now, actor.as_deref(), event, Some(detail), ip).await?;
+        tx.commit().await?;
+        Ok(ok)
+    }
+
+    /// MFA columns of a user.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn get_mfa_state(&self, user_id: i64) -> Result<Option<MfaState>, StoreError> {
+        let row = sqlx::query(
+            "SELECT username, totp_enabled, totp_secret_enc, totp_last_step FROM account WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(self.web())
+        .await?;
+        row.map(|r| {
+            Ok(MfaState {
+                username: r.try_get("username")?,
+                totp_enabled: r.try_get::<bool, _>("totp_enabled")?,
+                totp_secret_enc: r.try_get("totp_secret_enc")?,
+                totp_last_step: r.try_get("totp_last_step")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Stores a freshly sealed pending TOTP secret unless one already exists (or `replace` is
+    /// set) and returns the blob now stored, so two concurrent enrollment page loads agree.
+    /// Returns `None` when TOTP is already enabled (enrollment is closed) or the user is gone.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn store_pending_totp(
+        &self,
+        user_id: i64,
+        sealed: &[u8],
+        replace: bool,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let mut tx = self.begin_account().await?;
+        sqlx::query(
+            "UPDATE account SET totp_secret_enc = $2 \
+             WHERE id = $1 AND totp_enabled = false AND (totp_secret_enc IS NULL OR $3)",
+        )
+        .bind(user_id)
+        .bind(sealed)
+        .bind(replace)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query("SELECT totp_enabled, totp_secret_enc FROM account WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        let Some(row) = row else { return Ok(None) };
+        if row.try_get::<bool, _>("totp_enabled")? {
+            return Ok(None);
+        }
+        Ok(row.try_get("totp_secret_enc")?)
+    }
+
+    /// Decides one second-factor attempt (see the module docs). Returns `true` only when the
+    /// factor is accepted. A TOTP step is accepted only if it is greater than the stored last
+    /// step (replay), and is recorded in the same transaction; a recovery code is consumed
+    /// (`used_at`) atomically. The failure counter is NOT cleared here: the caller invokes
+    /// [`PgDb::record_login_success`] once the whole login is complete.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn second_factor_step(&self, a: FactorAttempt<'_>) -> Result<bool, StoreError> {
+        let mut tx = self.begin_account().await?;
+        let row = sqlx::query(
+            "SELECT username, totp_enabled, totp_last_step, locked_until FROM account \
+             WHERE id = $1 AND deleted_at IS NULL AND disabled_at IS NULL",
+        )
+        .bind(a.user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut exists = false;
+        let mut actor: Option<String> = None;
+        let mut enabled = false;
+        let mut last_step: Option<i64> = None;
+        let mut locked = false;
+        if let Some(r) = &row {
+            exists = true;
+            actor = Some(r.try_get("username")?);
+            enabled = r.try_get::<bool, _>("totp_enabled")?;
+            last_step = r.try_get("totp_last_step")?;
+            locked = r
+                .try_get::<Option<i64>, _>("locked_until")?
+                .is_some_and(|l| l > a.now);
+        }
+        let usable = exists && enabled && !locked && a.precondition_ok;
+        let mut accepted = false;
+        let mut recovery_used = false;
+        if usable {
+            match a.factor {
+                SecondFactor::Totp(Some(step)) if last_step.is_none_or(|l| step > l) => {
+                    // Compare-and-set: only one concurrent request can move the step forward.
+                    let res = sqlx::query(
+                        "UPDATE account SET totp_last_step = $2 \
+                         WHERE id = $1 AND (totp_last_step IS NULL OR totp_last_step < $2)",
+                    )
+                    .bind(a.user_id)
+                    .bind(step)
+                    .execute(&mut *tx)
+                    .await?;
+                    accepted = res.rows_affected() == 1;
+                }
+                SecondFactor::Recovery(Some(hash)) => {
+                    let res = sqlx::query(
+                        "UPDATE recovery_code SET used_at = $3 \
+                         WHERE account_id = $1 AND code_hash = $2 AND used_at IS NULL",
+                    )
+                    .bind(a.user_id)
+                    .bind(hash.as_slice())
+                    .bind(a.now)
+                    .execute(&mut *tx)
+                    .await?;
+                    accepted = res.rows_affected() == 1;
+                    recovery_used = accepted;
+                }
+                _ => {}
+            }
+        }
+        let reason = if !exists {
+            "no_user"
+        } else if locked {
+            "locked"
+        } else if !enabled {
+            "not_enrolled"
+        } else if !a.precondition_ok {
+            "reauth_failed"
+        } else {
+            "bad_code"
+        };
+        // Re-auth with a code from a step that was already used is the owner re-using their own
+        // code (e.g. right after a password change), not a guess: refuse it without counting it.
+        let own_replay = !accepted
+            && usable
+            && a.purpose != "login"
+            && matches!(a.factor, SecondFactor::Totp(Some(step)) if last_step.is_some_and(|l| step <= l));
+        if !accepted && exists && !locked && !own_replay {
+            bump_failure(&mut tx, a.user_id, a.now).await?;
+        }
+        let reason = if own_replay { "replay" } else { reason };
+        let (event, detail) = if recovery_used {
+            ("mfa.recovery_used", format!("purpose={}", a.purpose))
+        } else if accepted {
+            ("mfa.ok", format!("purpose={}", a.purpose))
+        } else {
+            ("mfa.fail", format!("purpose={} reason={reason}", a.purpose))
+        };
+        audit_tx(&mut tx, a.now, actor.as_deref(), event, Some(&detail), a.ip).await?;
+        tx.commit().await?;
+        Ok(accepted)
+    }
+
+    /// Confirms first-time enrollment in one transaction: the pending secret becomes active,
+    /// the matched step becomes the replay floor and `recovery_hashes` replace any old codes.
+    /// Returns `false` (counted as a failure) for a wrong code, a locked account, or when there
+    /// is no pending secret.
+    ///
+    /// # Errors
+    /// Database failure.
+    // Every argument is a distinct, required input of the one atomic verdict.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn confirm_totp_enrollment(
+        &self,
+        user_id: i64,
+        sealed: &[u8],
+        token_hash: Option<[u8; 32]>,
+        step: Option<i64>,
+        recovery_hashes: &[[u8; 32]],
+        ip: Option<&str>,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.begin_account().await?;
+        let row = sqlx::query(
+            "SELECT username, totp_enabled, totp_secret_enc, locked_until, enroll_token_hash, \
+             enroll_token_expires FROM account WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut exists = false;
+        let mut actor: Option<String> = None;
+        let mut pending = false;
+        let mut locked = false;
+        if let Some(r) = &row {
+            exists = true;
+            actor = Some(r.try_get("username")?);
+            // The confirmation must be for the very secret the user saw (`sealed`), and the
+            // one-time enrollment token must still be valid and match.
+            let stored_blob: Option<Vec<u8>> = r.try_get("totp_secret_enc")?;
+            let stored_tok: Option<Vec<u8>> = r.try_get("enroll_token_hash")?;
+            let expires: Option<i64> = r.try_get("enroll_token_expires")?;
+            let token_ok = match (&stored_tok, &token_hash) {
+                (Some(s), Some(t)) => ct_eq32(s, t),
+                _ => false,
+            } && expires.is_some_and(|e| e > now);
+            pending = !r.try_get::<bool, _>("totp_enabled")?
+                && stored_blob.as_deref() == Some(sealed)
+                && token_ok;
+            locked = r
+                .try_get::<Option<i64>, _>("locked_until")?
+                .is_some_and(|l| l > now);
+        }
+        let accepted = exists && pending && !locked && step.is_some();
+        if accepted {
+            let res = sqlx::query(
+                "UPDATE account SET totp_enabled = true, totp_last_step = $2, enroll_token_hash = NULL, \
+                 enroll_token_expires = NULL WHERE id = $1 AND totp_enabled = false AND totp_secret_enc = $3",
+            )
+            .bind(user_id)
+            .bind(step)
+            .bind(sealed)
+            .execute(&mut *tx)
+            .await?;
+            if res.rows_affected() != 1 {
+                return Err(StoreError::NotFound);
+            }
+            sqlx::query("DELETE FROM recovery_code WHERE account_id = $1")
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+            for h in recovery_hashes {
+                sqlx::query("INSERT INTO recovery_code (account_id, code_hash) VALUES ($1, $2)")
+                    .bind(user_id)
+                    .bind(h.as_slice())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        } else if exists && !locked {
+            bump_failure(&mut tx, user_id, now).await?;
+        }
+        let (event, detail) = if accepted {
+            ("mfa.enrolled", "ok")
+        } else if locked {
+            ("mfa.fail", "purpose=enroll reason=locked")
+        } else {
+            ("mfa.fail", "purpose=enroll reason=bad_code")
+        };
+        audit_tx(&mut tx, now, actor.as_deref(), event, Some(detail), ip).await?;
+        tx.commit().await?;
+        Ok(accepted)
+    }
+
+    /// Replaces all recovery codes (old ones, used or not, stop working). Audit-logged.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn replace_recovery_codes(
+        &self,
+        user_id: i64,
+        hashes: &[[u8; 32]],
+        ip: Option<&str>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.begin_account().await?;
+        sqlx::query("DELETE FROM recovery_code WHERE account_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        for h in hashes {
+            sqlx::query("INSERT INTO recovery_code (account_id, code_hash) VALUES ($1, $2)")
+                .bind(user_id)
+                .bind(h.as_slice())
+                .execute(&mut *tx)
+                .await?;
+        }
+        let actor = username_of(&mut tx, user_id).await?;
+        audit_tx(
+            &mut tx,
+            now,
+            actor.as_deref(),
+            "mfa.recovery_regenerated",
+            None,
+            ip,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Number of recovery codes that can still be used.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn count_unused_recovery_codes(&self, user_id: i64) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM recovery_code WHERE account_id = $1 AND used_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(self.web())
+        .await?)
+    }
+
+    /// Replaces the password hash after an authenticated, re-verified change and revokes EVERY
+    /// session of the user (the caller then mints a fresh one: rotation at password change).
+    /// API keys are kept (the owner is present and authenticated). Audit-logged.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] if the user vanished.
+    pub async fn change_password(
+        &self,
+        user_id: i64,
+        password_hash: &str,
+        ip: Option<&str>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.begin_account().await?;
+        let res = sqlx::query(
+            "UPDATE account SET password_hash = $2, password_changed_at = $3 WHERE id = $1",
+        )
+        .bind(user_id)
+        .bind(password_hash)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        let revoked = sqlx::query("DELETE FROM session WHERE account_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let detail = format!("sessions_revoked={revoked}");
+        let actor = username_of(&mut tx, user_id).await?;
+        audit_tx(
+            &mut tx,
+            now,
+            actor.as_deref(),
+            "user.password_changed",
+            Some(&detail),
+            ip,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Unexpired `active` sessions of the user, newest first.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn list_active_sessions(
+        &self,
+        user_id: i64,
+        now: i64,
+    ) -> Result<Vec<SessionInfo>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id_hash, created_at, last_seen_at, ip, user_agent FROM session \
+             WHERE account_id = $1 AND stage = 'active' AND expires_at > $2 \
+             ORDER BY created_at DESC, seq DESC",
+        )
+        .bind(user_id)
+        .bind(now)
+        .fetch_all(self.web())
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let raw: Vec<u8> = r.try_get("id_hash")?;
+                Ok(SessionInfo {
+                    id_hash: <[u8; 32]>::try_from(raw.as_slice())
+                        .map_err(|_| StoreError::OutOfRange("session id hash"))?,
+                    created_at: r.try_get("created_at")?,
+                    last_seen_at: r.try_get("last_seen_at")?,
+                    ip: r.try_get("ip")?,
+                    user_agent: r.try_get("user_agent")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Revokes one session, but only if it belongs to `user_id`. Audit-logged when removed.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn revoke_user_session(
+        &self,
+        user_id: i64,
+        id_hash: &[u8; 32],
+        ip: Option<&str>,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.begin_account().await?;
+        let n = sqlx::query("DELETE FROM session WHERE account_id = $1 AND id_hash = $2")
+            .bind(user_id)
+            .bind(id_hash.as_slice())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if n > 0 {
+            let actor = username_of(&mut tx, user_id).await?;
+            audit_tx(&mut tx, now, actor.as_deref(), "session.revoked", None, ip).await?;
+        }
+        tx.commit().await?;
+        Ok(n > 0)
+    }
+
+    /// Revokes every session of the user except `keep`. Returns how many were removed.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn revoke_other_sessions(
+        &self,
+        user_id: i64,
+        keep: &[u8; 32],
+        ip: Option<&str>,
+        now: i64,
+    ) -> Result<u64, StoreError> {
+        let mut tx = self.begin_account().await?;
+        let n = sqlx::query("DELETE FROM session WHERE account_id = $1 AND id_hash <> $2")
+            .bind(user_id)
+            .bind(keep.as_slice())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        let detail = format!("count={n}");
+        let actor = username_of(&mut tx, user_id).await?;
+        audit_tx(
+            &mut tx,
+            now,
+            actor.as_deref(),
+            "session.revoked_others",
+            Some(&detail),
+            ip,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(n)
+    }
+}

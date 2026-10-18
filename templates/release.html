@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+{% if let Some(n) = source_name %}<p class="muted">{{ n }}</p>{% endif %}
+<p class="actions"><a class="button" href="/release/{{ id }}/download" download>Download NZB</a> <a href="/release/{{ id }}/raw">Raw view</a></p>
+{% if !flags.is_empty() %}<section class="card alerts {{ alert_level }}" aria-label="Alerts"><ul class="plain">{% for f in flags %}<li><span class="badge st-{{ f.class }}">{{ f.text }}</span></li>{% endfor %}</ul></section>{% endif %}
+<section class="card" aria-labelledby="summary-h">
+<h2 id="summary-h">Summary</h2>
+<dl class="facts">
+<dt>Category</dt><dd>{{ category }} <span class="badge {{ category_source_class }}">{{ category_source }}</span></dd>
+<dt>Source</dt><dd>{% if let Some(l) = source_label %}{{ l }}{% else %}<span class="muted">-</span>{% endif %}</dd>
+{% if let Some(o) = origin %}<dt>Added via</dt><dd>{{ o }}</dd>{% endif %}
+<dt>Added by</dt><dd>{{ added_by }}</dd>
+<dt>Posted</dt><dd>{{ posted }}</dd>
+<dt>Indexed</dt><dd>{{ ingested }}</dd>
+<dt>Total size</dt><dd>{{ size }} (NZB file {{ nzb_size }})</dd>
+{% if let Some(p) = poster %}<dt>Poster</dt><dd>{{ p }}</dd>{% endif %}
+<dt>Files</dt><dd>{{ file_count }}</dd>
+<dt>Segments</dt><dd>{% if health %}{{ segment_count }} present, {{ missing_segments }} missing ({{ completeness }} complete){% else %}{{ segment_count }} segments{% endif %}{% if missing_segments > 0 %} <span class="meter {{ meter_state }}" role="img" aria-label="Completeness {{ completeness }}"><i class="{{ meter_class }}"></i></span>{% endif %}</dd>
+{% if !groups.is_empty() %}<dt>Groups</dt><dd>{% for g in groups %}<code>{{ g }}</code> {% endfor %}</dd>{% endif %}
+</dl>
+<h3>Scene info</h3>
+{% if scene.is_empty() %}<p class="muted">Not recognised.</p>{% else %}<dl class="facts">
+{% for s in scene %}<dt>{{ s.label }}</dt><dd>{{ s.value }}</dd>
+{% endfor %}</dl>{% endif %}
+<p class="muted">NZB header meta (including any password) is shown in the <a href="/release/{{ id }}/raw">raw view</a>.</p>
+</section>
+
+{% if can_edit || can_delete %}<section class="card" aria-labelledby="cat-h">
+<h2 id="cat-h">Edit</h2>
+{% if can_edit %}<form method="post" action="/release/{{ id }}/source" class="inline">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">{% endif %}
+<label for="source">Source</label>
+<input id="source" name="source" type="text" value="{{ source_edit }}" maxlength="64" autocomplete="off" placeholder="torrent, personal archive, ...">
+<button type="submit">Save source</button>
+</form>
+<p class="muted">Free text shown in the Source column; leave it empty to clear.</p>
+<form method="post" action="/release/{{ id }}/category" class="inline">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">{% endif %}
+<label for="category">Category</label>
+<select id="category" name="category">{% for c in categories %}<option value="{{ c.value }}"{% if c.selected %} selected{% endif %}>{{ c.label }}</option>{% endfor %}</select>
+<button type="submit">Change category</button>
+</form>
+{% if overridden %}<p class="muted">Set manually; re-indexing never changes it.</p>{% endif %}
+{% endif %}{% if can_delete %}<div class="dangerzone">
+<h3>Danger zone</h3>
+<p class="muted">Deleting moves the release to the trash; it asks for confirmation, your password and a code.</p>
+<p><a class="button danger" href="/release/{{ id }}/delete">Delete release</a></p>
+</div>{% endif %}
+</section>
+{% endif %}
+
+<section aria-labelledby="files-h">
+<h2 id="files-h">Files</h2>
+{% if files.is_empty() %}<p class="muted" role="status">No files.</p>{% else %}
+<div id="files" hx-target="#files" hx-select="#files" hx-swap="outerHTML">
+<p class="muted" role="status">Showing {{ first }}-{{ last }} of {{ total_files }} files (page {{ page }} of {{ pages }}).</p>
+<form method="post" action="/release/{{ id }}/download/selected" id="selfiles" aria-label="Download selected files">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<div tabindex="0" class="tablewrap">
+<table>
+<caption class="sr">Files in this NZB</caption>
+<thead><tr><th scope="col" class="fit"><span class="sr">Select</span></th><th scope="col" class="fit">#</th><th scope="col">Name</th><th scope="col" class="fit">Type</th><th scope="col" class="fit">Size</th><th scope="col" class="fit">Segments</th><th scope="col">Missing</th>{% if any_gap %}<th scope="col" class="fit">Completeness</th>{% endif %}</tr></thead>
+<tbody>
+{% for f in files %}<tr{% if f.has_gap %} class="gapfile"{% endif %}>
+<td class="fit"><input type="checkbox" name="file" value="{{ f.idx }}" aria-label="Select {{ f.name }}"></td>
+<td class="fit">{{ f.idx }}</td>
+<th scope="row" class="title"><code>{{ f.name }}</code></th>
+<td class="fit"><span class="badge kind {{ f.kind_class }}">{{ f.kind }}</span></td>
+<td class="fit">{{ f.size }}</td>
+<td class="fit"><a href="/release/{{ id }}/file/{{ f.idx }}/segments">{{ f.segs }}</a></td>
+<td>{% if f.missing == 0 && f.more_ranges.is_empty() %}<span class="muted">-</span>{% else %}{{ f.missing }}{% if !f.ranges.is_empty() %}: {{ f.ranges }}{% endif %}{% if !f.more_ranges.is_empty() %} <span class="muted">({{ f.more_ranges }})</span>{% endif %}{% endif %}</td>
+{% if any_gap %}<td class="fit">{% if f.has_gap && !f.cells.is_empty() %}<span class="bar" role="img" aria-label="{{ f.bar_label }}">{% for c in f.cells %}<i class="{{ c }}"></i>{% endfor %}</span>{% endif %}</td>{% endif %}
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+<p class="actions selbar"><button type="submit">Download selected</button> <span class="muted">An NZB with only the files ticked on this page.</span></p>
+</form>
+<div class="pagerbar">
+<nav class="pager" aria-label="Files pagination" hx-boost="true">
+{% if let Some(h) = prev_href %}<a rel="prev" href="{{ h }}">Previous</a>{% else %}<span class="muted">Previous</span>{% endif %}
+<span>Page {{ page }} of {{ pages }}</span>
+{% if let Some(h) = next_href %}<a rel="next" href="{{ h }}">Next</a>{% else %}<span class="muted">Next</span>{% endif %}
+</nav>
+<form method="post" action="/page-size" class="perpage" aria-label="Files per page">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<input type="hidden" name="list" value="files">
+<input type="hidden" name="release" value="{{ id }}">
+<label for="files-per-page">Per page</label>
+<select id="files-per-page" name="per_page">{% for c in per_page_choices %}<option value="{{ c.value }}"{% if c.selected %} selected{% endif %}>{{ c.label }}</option>{% endfor %}</select>
+<button type="submit">Show</button>
+</form>
+</div>
+</div>
+{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+<h1>{{ heading }}</h1>
+<dl class="facts">
+<dt>Display name</dt><dd>{{ target_display }}</dd>
+<dt>Username</dt><dd><code>{{ target_username }}</code></dd>
+<dt>Role</dt><dd>{{ target_role }}</dd>
+</dl>
+<p>{{ explain }}</p>
+{% if let Some(a) = alert %}<p class="alert" role="alert">{{ a }}</p>
+{% endif %}<form method="post" action="/admin/users/{{ id }}/{{ action }}" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+{% if action == "role" %}<p><label for="role">New role</label><br>
+<select id="role" name="role"><option value="{{ other_role }}" selected>{{ other_role_label }}</option></select></p>
+{% endif %}{% if reauth %}<p><label for="current_password">Your current password</label><br>
+<input id="current_password" name="current_password" type="password" maxlength="256" autocomplete="current-password" required></p>
+<p><label for="code">Your authenticator code</label><br>
+<input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></p>
+{% endif %}<p><button type="submit"{% if danger %} class="danger"{% endif %}>{{ button }}</button> <a href="/admin/users">Cancel</a></p>
+</form>
+</section>
+{% endblock %}

@@ -1,0 +1,19 @@
+/target/
+/data/
+/secrets/
+.DS_Store
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+# install.sh output: host-specific configuration and secrets
+deploy/.env
+deploy/.env.bak.*
+deploy/compose.yaml
+deploy/compose.yaml.bak.*
+deploy/config/nzbd.toml
+deploy/compose.proxy-net.yaml
+deploy/.install-overlay.*
+deploy/.env.tmp
+deploy/*.new
+deploy/config/*.new
+/deploy/data/

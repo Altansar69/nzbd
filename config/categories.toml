@@ -1,0 +1,159 @@
+# Category taxonomy (single source of truth; PARSER_SPEC section Taxonomy).
+# Embedded into nzb-core at build time, seeded into the `category` table by nzb-store and listed
+# by `nzbd categories`. Hint values (X-Category, upload dropdown, watch sub-folder) are compared
+# against `id` / `slug` exactly. Parents must appear before their children. Id 8010 is the
+# fallback and must exist. Changing an id here changes stored data: never renumber.
+
+[[category]]
+id = 1000
+slug = "console"
+name = "Console"
+
+[[category]]
+id = 2000
+slug = "movies"
+name = "Movies"
+
+[[category]]
+id = 2030
+parent = 2000
+slug = "movies.sd"
+name = "Movies/SD"
+
+[[category]]
+id = 2040
+parent = 2000
+slug = "movies.hd"
+name = "Movies/HD"
+
+[[category]]
+id = 2045
+parent = 2000
+slug = "movies.uhd"
+name = "Movies/UHD"
+
+[[category]]
+id = 2050
+parent = 2000
+slug = "movies.bluray"
+name = "Movies/BluRay"
+
+[[category]]
+id = 2060
+parent = 2000
+slug = "movies.3d"
+name = "Movies/3D"
+
+[[category]]
+id = 2070
+parent = 2000
+slug = "movies.dvd"
+name = "Movies/DVD"
+
+[[category]]
+id = 3000
+slug = "audio"
+name = "Audio"
+
+[[category]]
+id = 3010
+parent = 3000
+slug = "audio.mp3"
+name = "Audio/MP3"
+
+[[category]]
+id = 3030
+parent = 3000
+slug = "audio.audiobook"
+name = "Audio/Audiobook"
+
+[[category]]
+id = 3040
+parent = 3000
+slug = "audio.lossless"
+name = "Audio/Lossless"
+
+[[category]]
+id = 4000
+slug = "pc"
+name = "PC"
+
+[[category]]
+id = 5000
+slug = "tv"
+name = "TV"
+
+[[category]]
+id = 5030
+parent = 5000
+slug = "tv.sd"
+name = "TV/SD"
+
+[[category]]
+id = 5040
+parent = 5000
+slug = "tv.hd"
+name = "TV/HD"
+
+[[category]]
+id = 5045
+parent = 5000
+slug = "tv.uhd"
+name = "TV/UHD"
+
+[[category]]
+id = 5060
+parent = 5000
+slug = "tv.sport"
+name = "TV/Sport"
+
+[[category]]
+id = 5070
+parent = 5000
+slug = "anime"
+name = "TV/Anime"
+
+[[category]]
+id = 5080
+parent = 5000
+slug = "tv.documentary"
+name = "TV/Documentary"
+
+[[category]]
+id = 6000
+slug = "xxx"
+name = "XXX"
+
+[[category]]
+id = 7000
+slug = "books"
+name = "Books"
+
+[[category]]
+id = 7010
+parent = 7000
+slug = "books.mags"
+name = "Books/Mags"
+
+[[category]]
+id = 7020
+parent = 7000
+slug = "books.ebook"
+name = "Books/Ebook"
+
+[[category]]
+id = 7030
+parent = 7000
+slug = "books.comics"
+name = "Books/Comics"
+
+[[category]]
+id = 8000
+slug = "other"
+name = "Other"
+
+[[category]]
+id = 8010
+parent = 8000
+slug = "other.misc"
+name = "Other/Misc"

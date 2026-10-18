@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+{% if recovery %}<h1>Set a new password</h1>
+<p>Your new password and this authenticator replace your current sign-in only once you confirm below. Until then your current password and authenticator keep working, and leaving this page changes nothing.</p>
+{% else %}<h1>Set up two-factor authentication</h1>
+{% if let Some(u) = welcome %}<p>Welcome, <strong>{{ u }}</strong>. Your username is shown here once: use it to sign in.</p>
+{% endif %}{% endif %}<p>Scan the QR code with an authenticator app (TOTP, SHA-1, 6 digits, 30 seconds), or enter the key by hand. Then type the current code to confirm.</p>
+<p class="qr"><img src="{{ qr }}" width="220" height="220" alt="QR code for the authenticator app"></p>
+<p>Key (base32):<br><code class="secret">{{ secret_text.as_str() }}</code></p>
+<details>
+<summary>Provisioning URI</summary>
+<p><code>{{ uri.as_str() }}</code></p>
+</details>
+<p class="muted">This key is shown only while setup is pending. After you confirm it, it cannot be displayed again.</p>
+{% if let Some(e) = error %}<p class="alert" role="alert">{{ e }}</p>
+{% endif %}<form method="post" action="/mfa/enroll" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+{% if !token.is_empty() %}<input type="hidden" name="token" value="{{ token }}">
+{% endif %}<p><label for="code">6-digit code</label><br>
+<input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" spellcheck="false" required autofocus></p>
+<p><button type="submit">Confirm and enable</button></p>
+</form>
+<form method="post" action="/logout">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><button type="submit">Cancel and sign out</button></p>
+</form>
+</section>
+{% endblock %}

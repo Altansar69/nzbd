@@ -1,0 +1,19 @@
+<div id="segments">
+{% if rows.is_empty() %}<p class="muted" role="status">No segments in this range ({{ total }} in this file).</p>{% else %}
+<p class="muted" role="status">Segments {{ first }}-{{ last }} of {{ total }}.</p>
+<div tabindex="0" class="tablewrap">
+<table>
+<caption class="sr">Segments of file {{ idx }}</caption>
+<thead><tr><th scope="col" class="fit">Number</th><th scope="col" class="fit">Bytes</th><th scope="col">Message-ID</th></tr></thead>
+<tbody>
+{% for r in rows %}{% if let Some(g) = r.gap %}<tr class="gaprow"><td colspan="3">{{ g }}</td></tr>
+{% endif %}<tr><td class="fit">{{ r.number }}</td><td class="fit">{{ r.bytes }}</td><td><code>{{ r.message_id }}</code></td></tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% endif %}
+<nav class="pager" aria-label="Segments pagination" hx-boost="true" hx-target="#segments" hx-swap="outerHTML">
+{% if let Some(h) = prev_href %}<a rel="prev" href="{{ h }}">Previous</a>{% else %}<span class="muted">Previous</span>{% endif %}
+{% if let Some(h) = next_href %}<a rel="next" href="{{ h }}">Next</a>{% else %}<span class="muted">Next</span>{% endif %}
+</nav>
+</div>

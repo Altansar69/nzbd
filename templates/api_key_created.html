@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+<h1>API key created</h1>
+<p>Label: <strong>{{ label }}</strong></p>
+<p>Copy this key now. It is shown only once and cannot be displayed again. If you lose it, revoke it and create a new one.</p>
+<p><code class="secret">{{ secret }}</code></p>
+<p class="muted">Send it in the <code>X-Api-Key</code> header, never in the URL.</p>
+<p><a href="/account">Back to the account page</a></p>
+</section>
+{% endblock %}

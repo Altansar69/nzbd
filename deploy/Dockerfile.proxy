@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+# Non-root, zero-capability Caddy, compiled from source with a committed module lock (deploy/proxy/go.mod + go.sum).
+# The official image's /usr/bin/caddy carries the file capability cap_net_bind_service=ep; with `cap_drop: ALL` +
+# `no-new-privileges` the kernel then refuses to exec it ("operation not permitted"). Our own build has no file
+# capability, so it runs as uid 65532 and never needs one (we listen on 8443).
+#   docker build -f deploy/Dockerfile.proxy -t nzbd-proxy:local deploy
+# Test tooling only: scripts/lib_docker.sh tools_image() reads this pin for busybox wget/nc and `caddy hash-password`.
+# Nothing is copied from this stage, so BuildKit never builds it and it is not part of the shipped image.
+FROM caddy:2@sha256:f2a1290d0463aad60660d4ec134943f183ee2a5f6c3eb7bf32dd984f2f020772 AS tools
+
+# Caddy is compiled here from the upstream release tag with Go >= 1.26.9 and golang.org/x/net >= 0.60.0,
+# because the official image of v2.11.7 was built with Go 1.26.8 / x/net 0.59.0 and carries fixable HIGH CVEs
+# (CVE-2026-78667, CVE-2026-78669, CVE-2026-97031; T061 M-2, closed by T083). No plugins, stock modules only.
+# Module versions and hashes are the committed deploy/proxy/go.mod + go.sum (T086, T085-L2): the build runs with
+# -mod=readonly, so any drift from the lock fails the build, and the last step fails it unless the finished binary
+# really carries the toolchain and x/net versions below (a later digest or lock bump cannot silently regress M-2).
+# To bump Caddy: `go get` the new version in deploy/proxy (inside the pinned golang image), `go mod tidy`, update
+# ARG CADDY_VERSION here, review the go.mod/go.sum diff.
+# When upstream publishes an image built with a fixed toolchain, this stage can go back to `FROM caddy:2@sha256:...`.
+FROM golang:1.26@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS build
+# Expectations asserted against the built binary, not inputs: overriding them cannot change what is compiled.
+ARG CADDY_VERSION=v2.11.7
+ARG MIN_GO=1.26.9
+ARG MIN_XNET=0.60.0
+ENV CGO_ENABLED=0 GOFLAGS="-mod=readonly -trimpath" GOTOOLCHAIN=local
+WORKDIR /src
+COPY proxy/go.mod proxy/go.sum ./
+RUN go mod download && go mod verify
+COPY proxy/main.go ./
+RUN go build -ldflags '-s -w' -o /out/bin/caddy . \
+ && /out/bin/caddy version
+RUN set -eu; \
+    ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$2" ]; }; \
+    info=$(go version -m /out/bin/caddy); \
+    gov=$(printf '%s\n' "$info" | sed -n '1s/^.*: go//p'); \
+    xnet=$(printf '%s\n' "$info" | awk '$1=="dep" && $2=="golang.org/x/net" {sub(/^v/,"",$3); print $3}'); \
+    cad=$(printf '%s\n' "$info" | awk '$1=="dep" && $2=="github.com/caddyserver/caddy/v2" {print $3}'); \
+    echo "proxy build: go=$gov x/net=$xnet caddy=$cad"; \
+    [ -n "$gov" ] && ge "$gov" "$MIN_GO" || { echo "FAIL: built with Go '$gov', need >= $MIN_GO" >&2; exit 1; }; \
+    [ -n "$xnet" ] && ge "$xnet" "$MIN_XNET" || { echo "FAIL: golang.org/x/net '$xnet', need >= $MIN_XNET" >&2; exit 1; }; \
+    [ "$cad" = "$CADDY_VERSION" ] || { echo "FAIL: caddy '$cad', expected $CADDY_VERSION" >&2; exit 1; }
+RUN mkdir -p /out/data /out/config \
+ && chown 65532:65532 /out/data /out/config \
+ && chmod 0700 /out/data /out/config
+
+# Fixed upstream digest of the distroless base; the binary above is built without file capabilities, so with
+# `cap_drop: ALL` + `no-new-privileges` it runs as uid 65532 and listens on 8443 without any capability.
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
+COPY --from=build /out/bin/caddy /usr/bin/caddy
+# Pre-owned by 65532 so fresh named volumes (CA, certificates) are writable by the non-root user.
+COPY --from=build --chown=65532:65532 /out/data /data
+COPY --from=build --chown=65532:65532 /out/config /config
+USER 65532:65532
+ENV XDG_DATA_HOME=/data XDG_CONFIG_HOME=/config
+EXPOSE 8443
+ENTRYPOINT ["/usr/bin/caddy"]
+CMD ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

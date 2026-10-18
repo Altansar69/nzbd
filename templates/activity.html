@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Activity</h1>
+<p class="muted">The audit log, newest first: uploads, deletions, downloads and other recorded events. Times are UTC.</p>
+
+<section class="card" aria-label="Filters">
+<form class="filters" method="get" action="/admin/activity" aria-label="Filter activity">
+<div class="grid">
+<p><label for="user">User</label>
+<select id="user" name="user"><option value="">All users</option>{% for u in users %}<option value="{{ u.value }}"{% if u.selected %} selected{% endif %}>{{ u.label }}</option>{% endfor %}</select></p>
+<p><label for="event">Event</label>
+<select id="event" name="event"><option value="">All events</option>{% for e in events %}<option value="{{ e.value }}"{% if e.selected %} selected{% endif %}>{{ e.label }}</option>{% endfor %}</select></p>
+<p><label for="from">From</label><input id="from" name="from" type="date" value="{{ from }}"></p>
+<p><label for="to">To</label><input id="to" name="to" type="date" value="{{ to }}"></p>
+</div>
+<p class="row"><button type="submit">Filter</button>{% if filtered %} <a href="/admin/activity">Clear filters</a>{% endif %}</p>
+</form>
+</section>
+
+<section class="card" aria-labelledby="h-activity">
+<h2 id="h-activity">Events</h2>
+{% if rows.is_empty() %}<p role="status">No events match.</p>
+{% else %}<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Audit events, newest first</caption>
+<thead><tr><th scope="col" class="fit">Time</th><th scope="col" class="fit">User</th><th scope="col" class="fit">Event</th><th scope="col">Detail</th></tr></thead>
+<tbody>
+{% for r in rows %}<tr><td class="fit">{{ r.time }}</td><td class="fit">{{ r.actor }}</td><td class="fit"><span class="badge">{{ r.event }}</span></td><td>{{ r.detail }}</td></tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% endif %}{% if let Some(o) = older %}<p><a href="{{ o }}" rel="next">Older</a></p>
+{% endif %}</section>
+{% endblock %}

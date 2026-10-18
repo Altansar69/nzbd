@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+{% if registration %}<h1>Accept an invitation</h1>
+<p>Enter the invitation code you received from an administrator and choose your password. You will set up two-factor authentication next.</p>
+{% else %}<h1>Redeem a recovery code</h1>
+<p>Enter the recovery code you received from an administrator and choose a new password. You will set up two-factor authentication again next.</p>
+{% endif %}
+{% if let Some(n) = notice %}<p class="alert" role="alert">{{ n }}</p>
+{% endif %}<form method="post" action="{{ action }}" autocomplete="off">
+<input type="hidden" name="login_token" value="{{ login_token }}">
+<p><label for="code">{% if registration %}Invitation code{% else %}Recovery code{% endif %}</label><br>
+<input id="code" name="code" type="text" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false" required autofocus></p>
+<p><label for="password">New password (12 to 256 characters)</label><br>
+<input id="password" name="password" type="password" maxlength="256" autocomplete="new-password" required></p>
+<p><label for="password2">Repeat password</label><br>
+<input id="password2" name="password2" type="password" maxlength="256" autocomplete="new-password" required></p>
+{% if registration %}<fieldset>
+<legend>Your profile (needed for a new account; leave empty when you redeem a recovery code)</legend>
+<p><label for="display_name">Display name</label><br>
+<input id="display_name" name="display_name" type="text" minlength="3" maxlength="32" autocomplete="nickname" autocapitalize="off" spellcheck="false" aria-describedby="display_name-help" value="{{ display_name }}"><br>
+<span id="display_name-help" class="muted">3 to 32 characters: letters, digits, - and _. It is shown to everyone next to what you add. It cannot be your username.</span></p>
+<p><label for="email">Email</label><br>
+<input id="email" name="email" type="email" maxlength="254" autocomplete="email" spellcheck="false" aria-describedby="email-help" value="{{ email }}"><br>
+<span id="email-help" class="muted">Visible only to you and the administrators. It is never used to send you anything.</span></p>
+</fieldset>
+{% endif %}<p><button type="submit">Continue</button></p>
+</form>
+<p class="muted"><a href="/login">Back to sign in</a></p>
+</section>
+{% endblock %}

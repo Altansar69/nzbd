@@ -1,0 +1,5 @@
+# Keep in sync with the FROM line in dev/Dockerfile.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

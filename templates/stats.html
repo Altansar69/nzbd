@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Statistics</h1>
+<p class="muted">Numbers for the releases you can see. They are refreshed every 10 minutes.</p>
+<ul class="tiles plain" aria-label="Library overview">
+<li class="tile"><span class="glyph" aria-hidden="true">&#9776;</span><span class="num">{% if let Some(v) = releases %}{{ v }}{% else %}<span aria-hidden="true">-</span><span class="sr">not available right now</span>{% endif %}</span><span class="lbl">Releases</span></li>
+<li class="tile"><span class="glyph" aria-hidden="true">&#9707;</span><span class="num">{% if let Some(v) = size %}{{ v }}{% else %}<span aria-hidden="true">-</span><span class="sr">not available right now</span>{% endif %}</span><span class="lbl">Total size</span></li>
+<li class="tile"><span class="glyph" aria-hidden="true">&#8593;</span><span class="num">{% if let Some(v) = week %}{{ v }}{% else %}<span aria-hidden="true">-</span><span class="sr">not available right now</span>{% endif %}</span><span class="lbl">Added in 7 days</span></li>
+<li class="tile"><span class="glyph" aria-hidden="true">&#8593;</span><span class="num">{% if let Some(v) = month %}{{ v }}{% else %}<span aria-hidden="true">-</span><span class="sr">not available right now</span>{% endif %}</span><span class="lbl">Added in 30 days</span></li>
+</ul>
+<section class="card stats" aria-labelledby="h-cat">
+<h2 id="h-cat">Releases per category</h2>
+{% if let Some(rows) = categories %}{% if rows.is_empty() %}<p class="muted" role="status">No releases yet.</p>
+{% else %}<div class="tablewrap">
+<table class="stats cats">
+<caption class="sr">Releases, total size and average size per category, most releases first</caption>
+<thead><tr><th scope="col">Category</th><th scope="col" class="num">Releases</th><th scope="col" class="num">Total size</th><th scope="col" class="num">Average</th></tr></thead>
+<tbody>
+{% for r in rows %}<tr{% if r.child %} class="child"{% endif %}>
+<th scope="row">{% if let Some(h) = r.href %}<a href="{{ h }}">{% for p in r.name_parts %}{% if !loop.first %}/<wbr>{% endif %}{{ p }}{% endfor %}</a>{% else %}{% for p in r.name_parts %}{% if !loop.first %}/<wbr>{% endif %}{{ p }}{% endfor %}{% endif %}<span class="sbar" aria-hidden="true"><i class="{{ r.width }}"></i></span></th>
+<td class="num">{{ r.releases }}</td>
+<td class="num">{{ r.size }}</td>
+<td class="num">{{ r.average }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+<p class="muted note">Categories without releases are not listed.</p>
+{% endif %}{% else %}<p class="muted" role="status">Not available right now. Try again in a minute.</p>
+{% endif %}</section>
+<div class="stats-grid">
+<section class="card stats" aria-labelledby="h-grp">
+<h2 id="h-grp">Top 10 release groups</h2>
+{% if groups.available %}{% if groups.rows.is_empty() %}<p class="muted" role="status">No releases yet.</p>
+{% else %}<div class="tablewrap">
+<table class="stats">
+<caption class="sr">Releases per release group, most releases first</caption>
+<thead><tr><th scope="col">Group</th><th scope="col" class="num">Releases</th></tr></thead>
+<tbody>
+{% for r in groups.rows %}<tr{% if r.other %} class="other"{% endif %}>
+<th scope="row">{% if let Some(h) = r.href %}<a href="{{ h }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif %}<span class="sbar" aria-hidden="true"><i class="{{ r.width }}"></i></span></th>
+<td class="num">{{ r.count }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+<p class="muted note">{{ groups_note }}</p>
+{% endif %}{% else %}<p class="muted" role="status">Not available right now. Try again in a minute.</p>
+{% endif %}</section>
+{% for q in quality %}<section class="card stats" aria-labelledby="{{ q.id }}">
+<h2 id="{{ q.id }}">{{ q.title }}</h2>
+{% if q.list.available %}{% if q.list.rows.is_empty() %}<p class="muted" role="status">No releases yet.</p>
+{% else %}<div class="tablewrap">
+<table class="stats">
+<caption class="sr">{{ q.title }}: releases, most first</caption>
+<thead><tr><th scope="col">Value</th><th scope="col" class="num">Releases</th></tr></thead>
+<tbody>
+{% for r in q.list.rows %}<tr{% if r.other %} class="other"{% endif %}>
+<th scope="row">{% if let Some(h) = r.href %}<a href="{{ h }}">{{ r.label }}</a>{% else %}{{ r.label }}{% endif %}<span class="sbar" aria-hidden="true"><i class="{{ r.width }}"></i></span></th>
+<td class="num">{{ r.count }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% endif %}{% else %}<p class="muted" role="status">Not available right now. Try again in a minute.</p>
+{% endif %}</section>
+{% endfor %}</div>
+<section class="card stats" aria-labelledby="h-time">
+<h2 id="h-time">Releases added per month</h2>
+{% if timeline.available %}<div class="tablewrap">
+<table class="stats">
+<caption class="sr">Releases added per month, the last 24 months, oldest first</caption>
+<thead><tr><th scope="col">Month</th><th scope="col" class="num">Releases</th></tr></thead>
+<tbody>
+{% for r in timeline.rows %}<tr>
+<th scope="row">{{ r.label }}<span class="sbar" aria-hidden="true"><i class="{{ r.width }}"></i></span></th>
+<td class="num">{{ r.count }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+<p class="muted note">{{ timeline_note }}</p>
+{% else %}<p class="muted" role="status">Not available right now. Try again in a minute.</p>
+{% endif %}</section>
+{% endblock %}

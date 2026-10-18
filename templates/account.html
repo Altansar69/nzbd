@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Account</h1>
+{% if let Some(m) = message %}<p class="notice" role="status">{{ m }}</p>
+{% endif %}{% if let Some(e) = error %}<p class="alert" role="alert">{{ e }}</p>
+{% endif %}{% if let Some(n) = replaced_notice %}<p class="notice" role="status">{{ n }}</p>
+{% endif %}
+<section class="card" aria-labelledby="h-id">
+<h2 id="h-id">Your account</h2>
+<dl class="facts">
+<dt>Username</dt><dd>{{ username }}</dd>
+<dt>Display name</dt><dd>{{ display_name }} <span class="muted">(shown to everyone next to what you add; chosen when you accepted your invitation, an administrator can change it)</span></dd>
+{% if show_email %}<dt>Email</dt><dd>{% if let Some(m) = email %}{{ m }}{% else %}<span class="muted">not set</span>{% endif %} <span class="muted">(visible only to you and the administrators; never used to send you anything)</span></dd>
+{% endif %}<dt>Role</dt><dd><span class="badge">{{ role_label }}</span></dd>
+</dl>
+</section>
+
+<section class="card" aria-labelledby="h-prefs">
+<h2 id="h-prefs">Preferences</h2>
+<form method="post" action="/account/preferences" class="prefs">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+{% if prefs.instance_hides_xxx %}<input type="hidden" name="hide_xxx" value="{% if prefs.hide_xxx %}1{% else %}0{% endif %}">
+<p class="muted">The XXX category is hidden for everyone on this server.</p>
+{% else %}<p class="checks"><label><input type="checkbox" name="hide_xxx" value="1"{% if prefs.hide_xxx %} checked{% endif %}> Hide XXX for me</label></p>
+<p class="muted">Hides the XXX category and its subcategories from your listings, search, totals and menus. Other accounts are not affected.</p>
+{% endif %}<fieldset>
+<legend>Theme</legend>
+{% for t in prefs.themes %}<label><input type="radio" name="theme" value="{{ t.value }}"{% if t.checked %} checked{% endif %}> {{ t.label }}</label>
+{% endfor %}</fieldset>
+<fieldset>
+<legend>Rows per page</legend>
+<p class="sizes"><label for="pref-releases">Releases</label>
+<select id="pref-releases" name="page_size_releases">{% for c in prefs.release_sizes %}<option value="{{ c.value }}"{% if c.selected %} selected{% endif %}>{{ c.label }}</option>{% endfor %}</select>
+<label for="pref-files">Files of a release</label>
+<select id="pref-files" name="page_size_files">{% for c in prefs.file_sizes %}<option value="{{ c.value }}"{% if c.selected %} selected{% endif %}>{{ c.label }}</option>{% endfor %}</select></p>
+<p class="muted">Also set with "Per page" under the release list and under the files of a release.</p>
+</fieldset>
+<p><button type="submit">Save preferences</button></p>
+</form>
+</section>
+
+<section class="card" aria-labelledby="h-mfa">
+<h2 id="h-mfa">Two-factor authentication</h2>
+<p>Status: <strong>enabled</strong>. Recovery codes left: <strong>{{ recovery_left }}</strong>.</p>
+{% if recovery_low %}<p class="alert">You are running low on recovery codes. Generate a new set below; this needs your authenticator. If you no longer have it, run <code>nzbd user reset-mfa</code> on the host instead.</p>
+{% endif %}<form method="post" action="/account/recovery-codes" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><label for="rc-password">Current password</label><br>
+<input id="rc-password" name="current_password" type="password" maxlength="256" autocomplete="current-password" required></p>
+<p><label for="rc-code">Authenticator code</label><br>
+<input id="rc-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></p>
+<p><button type="submit">Generate new recovery codes</button></p>
+<p class="muted">This invalidates all earlier codes. If your code was just used to sign in, wait for the next one.</p>
+</form>
+</section>
+
+<section class="card" aria-labelledby="h-pw">
+<h2 id="h-pw">Change password</h2>
+<form method="post" action="/account/password" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><label for="pw-current">Current password</label><br>
+<input id="pw-current" name="current_password" type="password" maxlength="256" autocomplete="current-password" required></p>
+<p><label for="pw-new">New password (12 to 256 characters)</label><br>
+<input id="pw-new" name="new_password" type="password" maxlength="256" autocomplete="new-password" required></p>
+<p><label for="pw-confirm">Repeat new password</label><br>
+<input id="pw-confirm" name="confirm_password" type="password" maxlength="256" autocomplete="new-password" required></p>
+<p><label for="pw-code">Authenticator code</label><br>
+<input id="pw-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></p>
+<p><button type="submit">Change password</button></p>
+<p class="muted">All sessions are signed out after a change, including this one.</p>
+</form>
+</section>
+
+<section class="card" aria-labelledby="h-sess">
+<h2 id="h-sess">Active sessions</h2>
+<div tabindex="0" class="tablewrap wrap">
+<table>
+<thead><tr><th scope="col">Started</th><th scope="col">Last active</th><th scope="col">Address</th><th scope="col">Browser</th><th scope="col">Action</th></tr></thead>
+<tbody>
+{% for s in sessions %}<tr>
+<td>{{ s.created }}</td><td>{{ s.last_seen }}</td><td>{{ s.ip }}</td><td>{{ s.user_agent }}</td>
+<td>{% if s.current %}This session{% else %}<form method="post" action="/account/sessions/revoke">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="session" value="{{ s.handle }}">
+<button type="submit">Revoke</button></form>{% endif %}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+<form method="post" action="/account/sessions/revoke-others">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><button type="submit">Revoke all other sessions</button></p>
+</form>
+</section>
+
+{% if show_keys %}<section class="card" aria-labelledby="h-keys">
+<h2 id="h-keys">API keys</h2>
+<p>Keys let scripts upload NZB files to <code>POST /api/v1/nzb</code> (header <code>X-Api-Key</code>). A key belongs to the account that created it, uploads as that account and can do nothing else. You have {{ api_keys_active }} of {{ api_keys_max }} active.{% if show_key_owner %} As an administrator you see and can revoke every account's keys.{% endif %}</p>
+<div tabindex="0" class="tablewrap wrap">
+<table>
+<thead><tr><th scope="col">Label</th><th scope="col">Key</th>{% if show_key_owner %}<th scope="col">Owner</th>{% endif %}<th scope="col">Scope</th><th scope="col">Rate</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Status</th></tr></thead>
+<tbody>
+{% for k in api_keys %}<tr>
+<td>{{ k.label }}</td><td><code>{{ k.prefix }}&hellip;</code></td>{% if show_key_owner %}<td>{{ k.owner }}</td>{% endif %}<td>{{ k.scope }}</td><td>{{ k.rate }}</td><td>{{ k.created }}</td><td>{{ k.last_used }}</td>
+<td>{% if let Some(r) = k.revoked %}Revoked {{ r }}{% else %}<form method="post" action="/account/api-keys/revoke">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="key" value="{{ k.id }}">
+<button type="submit">Revoke</button></form>{% endif %}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+<form method="post" action="/account/api-keys" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><label for="ak-label">Label (for example the name of the script)</label><br>
+<input id="ak-label" name="label" type="text" maxlength="64" required></p>
+<p><label for="ak-rate">Uploads per minute (optional, 1 to 30; empty uses the instance limit)</label><br>
+<input id="ak-rate" name="rate" type="text" inputmode="numeric" maxlength="2" pattern="[0-9]*"></p>
+<p><label for="ak-password">Current password</label><br>
+<input id="ak-password" name="current_password" type="password" maxlength="256" autocomplete="current-password" required></p>
+<p><label for="ak-code">Authenticator code</label><br>
+<input id="ak-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></p>
+<p><button type="submit">Create API key</button></p>
+<p class="muted">The key is shown once, right after creation. Only a hash is stored.</p>
+</form>
+</section>
+{% endif %}{% endblock %}

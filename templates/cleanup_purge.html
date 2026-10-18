@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Purge {{ name }}</h1>
+{% if let Some(e) = error %}<p class="alert" role="alert">{{ e }}</p>
+{% endif %}
+<section class="card alerts" aria-labelledby="p-what">
+<h2 id="p-what">Confirm the purge</h2>
+<p>{{ what }}</p>
+{% if known %}<p><strong>{{ items }}</strong> item(s), {{ size }}, are in this bucket now. The purge removes only the ones that pass the safety checks and reports what it skipped.</p>
+{% else %}<p class="alert">The counts are unavailable right now.</p>
+{% endif %}<p><strong>This permanently deletes files from disk. It cannot be undone.</strong></p>
+<form method="post" action="/admin/cleanup/purge/{{ slug }}" autocomplete="off">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<p><label for="pg-confirm">Type <strong>{{ slug }}</strong> to confirm</label><br>
+<input id="pg-confirm" name="confirm" type="text" maxlength="16" autocomplete="off" required></p>
+<p><label for="pg-password">Current password</label><br>
+<input id="pg-password" name="current_password" type="password" maxlength="256" autocomplete="current-password" required></p>
+<p><label for="pg-code">Authenticator code</label><br>
+<input id="pg-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></p>
+<p><button type="submit" class="danger">Purge {{ name }}</button> <a href="/admin/cleanup">Cancel</a></p>
+</form>
+</section>
+{% endblock %}

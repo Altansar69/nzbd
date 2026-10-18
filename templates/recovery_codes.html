@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+<h1>{{ heading }}</h1>
+<p class="alert" role="alert">Shown once. Save these codes now; they cannot be displayed again.</p>
+<p>Store these recovery codes somewhere safe. Each one works once if you lose your authenticator. They are shown only now and cannot be displayed again.</p>
+<ol class="codes">
+{% for c in codes %}<li><code>{{ c }}</code></li>
+{% endfor %}</ol>
+<p><a href="{{ continue_href }}">{{ continue_label }}</a></p>
+</section>
+{% endblock %}

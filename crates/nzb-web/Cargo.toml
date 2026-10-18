@@ -1,0 +1,64 @@
+[package]
+name = "nzb-web"
+description = "HTTP app: middleware, auth, UI, upload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Argon2id (SEC-022): RustCrypto, pure Rust, no network.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+askama = { version = "0.16.1", default-features = false, features = ["std", "derive", "config"] }
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "matched-path", "multipart"] }
+# CRC-32 of the stored entries of the bulk-download zip (T130); already in Cargo.lock (tantivy, flate2).
+crc32fast = "1.5"
+# base64url for 256-bit session ids (already used by nzbd; same version).
+base64 = "0.23.1"
+# XChaCha20-Poly1305 AEAD for the TOTP secret at rest (SEC-023). RustCrypto, pure Rust, audited family.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# HMAC-SHA256 for stateless login-form tokens (SEC-025); already in Cargo.lock, pairs with sha2 0.10.
+hmac = "0.12"
+# `Body` trait for the permit-holding download body (already in the lockfile via axum/hyper).
+http-body = "1"
+http-body-util = "0.1.5"
+# Upload pipeline handle/Job types (T051); workspace-internal.
+nzb-ingest = { version = "0.5.0", path = "../nzb-ingest" }
+nzb-core = { version = "0.5.0", path = "../nzb-core" }
+nzb-store = { version = "0.5.0", path = "../nzb-store" }
+# The v3 search contract (T123): `SearchIndexV3` (prefix, fuzzy fallback, "more than n", narrowed) and the bounded
+# degraded browse; workspace-internal, already linked into nzbd.
+nzb-search = { version = "0.5.0", path = "../nzb-search" }
+# Server-side QR code as inline SVG for TOTP enrollment (no JS, no external service).
+qrcode = { version = "0.14", default-features = false }
+# HMAC-SHA1 is what RFC 6238 authenticator apps expect; already in the lockfile.
+sha1 = "0.10"
+# Reads the stored missing-range / language JSON columns (already in the workspace lockfile).
+serde_json = "1"
+sha2 = "0.10.9"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["time", "sync", "rt", "fs", "io-util"] }
+# Dispatch to the real router once the database is ready (`starting.rs`); already compiled for axum.
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+tracing = "0.1.44"
+zeroize = "1"
+
+[dev-dependencies]
+# Test-only slow blob store implementing the async `NzbStore` trait (already in the lockfile).
+async-trait = "0.1"
+# Generated NZB documents for the explorer tests (workspace-internal, dev only).
+nzb-testkit = { version = "0.5.0", path = "../nzb-testkit" }
+# The listing in tests: the Tantivy index over the test store, settled before every read (workspace-internal, dev only).
+nzb-search = { version = "0.5.0", path = "../nzb-search", features = ["test-support"] }
+# The backend matrix (NZBD_TEST_BACKEND, no default) and the Postgres test harness (T122).
+nzb-store = { version = "0.5.0", path = "../nzb-store", features = ["pg-test-support"] }
+futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
+tokio = { version = "1.53.2", features = ["rt", "macros", "time", "net", "io-util"] }
+# Same sqlx as nzb-store (tests flip user columns directly).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }

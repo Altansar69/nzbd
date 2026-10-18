@@ -1,0 +1,90 @@
+# The ".htaccess" layer in front of nzbd (docs/DEPLOYMENT.md). Values come from the proxy container's
+# environment (compose passes NZBD_PROXY_USER / NZBD_PROXY_HASH / NZBD_SITE); no secrets live here.
+{
+	# Unprivileged ports inside the container; compose publishes 8443 as the HTTPS port.
+	https_port 8443
+	http_port 8080
+	auto_https disable_redirects
+	admin off
+	skip_install_trust   # no trust store in the container; clients trust the CA from the caddy_data volume
+
+	# Secrets never in logs (SEC-036, T061 M-1). Caddy redacts Authorization/Cookie/Set-Cookie/
+	# Proxy-Authorization on its own, but it prints every other request header verbatim in its error
+	# lines (for example the 502 that appears when the app answers 413 and closes while a large upload
+	# is still being sent). The app's X-Api-Key and X-CSRF-Token would then sit in `docker logs` for the
+	# life of the container. Header names are printed in canonical form (X-Api-Key, X-Csrf-Token).
+	# The explicit Cookie/Authorization lines are defence in depth should Caddy's default change.
+	log {
+		output stderr
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Api-Key replace REDACTED
+				request>headers>X-Csrf-Token replace REDACTED
+				request>headers>Cookie replace REDACTED
+				request>headers>Authorization replace REDACTED
+				request>uri query {
+					replace api_key REDACTED
+					replace key REDACTED
+				}
+			}
+		}
+	}
+	servers {
+		# Only h1/h2 are reachable (UDP is not published); don't advertise h3.
+		protocols h1 h2
+		max_header_size 16KB
+		# Slowloris defence (SEC-032): the proxy is the only exposed surface. read_body is generous
+		# so a 64 MiB upload completes on slow Wi-Fi; read_header is what kills idle/drip clients.
+		timeouts {
+			read_header 10s
+			read_body 5m
+			write 5m
+			idle 2m
+		}
+	}
+}
+
+{$NZBD_SITE:nzbd.lan} {
+	tls internal
+
+	# First gate for EVERYTHING, including /api/v1/nzb (API clients send Basic credentials AND
+	# X-Api-Key). The app never reads Authorization, so the layers do not conflict.
+	basic_auth {
+		{$NZBD_PROXY_USER} {$NZBD_PROXY_HASH}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# /healthz is for the container HEALTHCHECK only (loopback inside the app container).
+	handle /healthz {
+		respond 404
+	}
+
+	# Body limit must be >= limits.max_file_bytes (64 MiB ceiling) plus multipart overhead.
+	@nzbupload path /upload /api/v1/nzb
+	handle @nzbupload {
+		request_body {
+			max_size 65MiB
+		}
+		reverse_proxy nzbd:8080 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up -Authorization
+		}
+	}
+
+	handle {
+		request_body {
+			max_size 1MiB
+		}
+		reverse_proxy nzbd:8080 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up -Authorization
+		}
+	}
+}

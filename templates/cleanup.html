@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Cleanup</h1>
+{% if !notice.is_empty() %}<p class="notice" role="status">{{ notice }}</p>
+{% endif %}{% if let Some(l) = last %}<p role="status">Last purge ({{ l.at }}): {{ l.bucket }}, {{ l.removed }} item(s) removed, {{ l.bytes }} freed, {{ l.skipped }} skipped.</p>
+{% endif %}
+<section class="card" aria-labelledby="c-buckets">
+<h2 id="c-buckets">Buckets</h2>
+<p class="muted">Purging permanently deletes files from disk and cannot be undone. Nothing is ever purged automatically: every purge needs your password, an authenticator code and the typed bucket name. The watch folder, the NZB store, duplicates and backups are never touched. Counts are refreshed at most every 15 seconds.</p>
+{% if !known %}<p class="alert" role="alert">The counts are unavailable right now. See the server log.</p>
+{% endif %}<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Cleanup buckets</caption>
+<thead><tr><th scope="col">Bucket</th><th scope="col">What it holds</th><th scope="col" class="fit">Items</th><th scope="col" class="fit">Size</th><th scope="col" class="fit">Action</th></tr></thead>
+<tbody>
+{% for b in buckets %}<tr><td><strong>{{ b.name }}</strong></td><td>{{ b.what }}{% for l in b.lines %}<br><span class="muted">{{ l }}</span>{% endfor %}</td><td class="fit">{{ b.items }}</td><td class="fit">{{ b.size }}</td><td class="fit">{% if b.items > 0 %}<a class="button danger" href="/admin/cleanup/purge/{{ b.slug }}">Purge {{ b.name }}</a>{% else %}<span class="muted">Nothing to purge</span>{% endif %}</td></tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% if foreign > 0 %}<p class="muted">{{ foreign }} file(s) in the failed folder were not written by nzbd: they are never counted in a bucket or touched.</p>
+{% endif %}</section>
+
+<section class="card" aria-labelledby="c-rules">
+<h2 id="c-rules">Rules</h2>
+<ul>
+<li><strong>Blocked</strong> and <strong>Failed</strong> only remove files that nzbd itself moved into the failed folder, have a valid reason record, and still match it byte for byte. Files without a reason record are counted but never purged.</li>
+<li><strong>Trash</strong> removes deleted releases, then blobs that <code>store gc</code> set aside once they are {{ quarantine_days }} days old (younger ones are kept), then leftovers that are provably copies of something that is still indexed.</li>
+<li>Everything is audited with counts only. The same actions exist on the server: <code>nzbd cleanup status</code> and <code>nzbd cleanup purge --bucket trash|blocked|failed</code>.</li>
+</ul>
+</section>
+{% endblock %}

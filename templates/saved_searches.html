@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Saved searches</h1>
+<p class="muted">Your saved searches are private to your account. You can keep up to {{ max }}. The number next to a saved search in the sidebar of the index counts the releases added since you last opened it.</p>
+{% if rows.is_empty() %}<section class="card empty" role="status"><p><strong>No saved searches yet.</strong></p>
+<p class="muted">Search or filter on the <a href="/">index</a>, then use <em>Save this search</em> below the filters.</p></section>
+{% else %}<section class="card" aria-labelledby="h-saved">
+<h2 id="h-saved">{{ rows.len() }} of {{ max }} saved searches</h2>
+<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Saved searches by name</caption>
+<thead><tr><th scope="col">Name</th><th scope="col">Filters</th><th scope="col">Actions</th></tr></thead>
+<tbody>
+{% for r in rows %}<tr>
+<td>{% if r.usable %}<a href="/search/saved/{{ r.id }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td>
+<td{% if !r.usable %} class="muted"{% endif %}>{{ r.summary }}</td>
+<td>
+<form method="post" action="/search/saved/{{ r.id }}/rename" class="inline">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<label class="sr" for="ss-{{ r.id }}">New name for {{ r.name }}</label><input id="ss-{{ r.id }}" name="name" type="text" maxlength="60" required autocomplete="off" value="{{ r.name }}">
+<button type="submit">Rename</button></form>
+<form method="post" action="/search/saved/{{ r.id }}/delete" class="inline">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<button type="submit" class="danger" aria-label="Delete {{ r.name }}">Delete</button></form>
+</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+</section>
+{% endif %}{% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Delete {{ count }} release(s)</h1>
+{% if let Some(e) = error %}<p class="alert" role="alert">{{ e }}</p>
+{% endif %}
+<section class="card" aria-labelledby="bd-what">
+<h2 id="bd-what">These releases</h2>
+<p class="muted">{{ count }} release(s), {{ total_size }} in total.</p>
+<ul class="bulklist">
+{% for i in items %}<li>{{ i.title }} <span class="muted">({{ i.category }})</span></li>
+{% endfor %}</ul>
+<p><a href="/">Cancel and go back to the index</a></p>
+</section>
+
+<section class="card alerts" aria-labelledby="bd-conf">
+<h2 id="bd-conf">What deleting does</h2>
+<ul>
+<li>The releases disappear from the index, search, statistics and the explorer, and can no longer be downloaded.</li>
+<li>Their NZB files are not erased: each is moved to the trash, where it stays restorable until you purge the trash from the Cleanup page. Restore one on the server with <code>nzbd trash restore</code>.</li>
+<li>Uploading or dropping the same file again creates a new release.</li>
+</ul>
+<form method="post" action="/releases/bulk/delete" autocomplete="off">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<input type="hidden" name="sel" value="{{ sel }}">
+{% for i in items %}<input type="hidden" name="id" value="{{ i.id }}">
+{% endfor %}<p><label for="del-confirm">Type <strong>{{ word }}</strong> to confirm</label><br>
+<input id="del-confirm" name="confirm" type="text" maxlength="16" autocomplete="off" required></p>
+<p><label for="del-password">Current password</label><br>
+<input id="del-password" name="current_password" type="password" maxlength="256" autocomplete="current-password" required></p>
+<p><label for="del-code">Authenticator code</label><br>
+<input id="del-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></p>
+<p><button type="submit" class="danger">Delete {{ count }} release(s)</button></p>
+</form>
+</section>
+{% endblock %}

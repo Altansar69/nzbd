@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Purge result</h1>
+<section class="card" aria-labelledby="r-h">
+<h2 id="r-h">{{ name }}</h2>
+<p class="notice" role="status">{{ removed }} item(s) removed, {{ bytes }} freed.</p>
+<ul>
+<li>Skipped, not written by nzbd: {{ unmanaged }}</li>
+<li>Skipped by a safety check (changed, linked, not provably redundant): {{ refused }}</li>
+<li>Kept because they are too young: {{ kept_recent }}</li>
+<li>Not processed (per-run limit or deadline; purge again): {{ remaining }}</li>
+<li>Errors: {{ errors }}</li>
+</ul>
+<p class="actions"><a class="button" href="/admin/cleanup">Back to Cleanup</a></p>
+</section>
+{% endblock %}

@@ -1,0 +1,16 @@
+# Override used by deploy/install.sh when you already run a reverse proxy (Traefik, nginx, Caddy, ...) in Docker;
+# install.sh merges it into the generated deploy/compose.yaml.
+#
+# The bundled Caddy proxy is not started (and not built). Where nzbd sits depends on the installer's network choice
+# (docs/QUICK_INSTALL.md, docs/OPERATOR_SECURITY.md "Existing reverse proxy"):
+#   1  a dedicated network shared by your proxy and nzbd only (created internal: no egress); nzbd is ONLY on it.
+#   2  an existing network of your proxy, e.g. a Traefik network shared with other apps; nzbd is ONLY on it. If it is
+#      not internal, nzbd has a route out and every container on it can reach http://nzbd:8080 without the proxy's
+#      outer login (owner-accepted exception to SEC-041, D34; the installer warns and asks).
+#   3  nzbd stays on the internal `back` network (no egress); YOUR proxy joins it as `nzbd_back` with the fixed address
+#      NZBD_PROXY_IP.
+# For 1 and 2 install.sh adds an overlay (networks: !override, static address, trusted proxy, Traefik labels). nzbd
+# trusts X-Forwarded-For / X-Forwarded-Proto only from the proxy's pinned address and is reached at http://nzbd:8080.
+services:
+  proxy:
+    profiles: ["bundled-proxy"]

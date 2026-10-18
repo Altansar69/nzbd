@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Delete release</h1>
+{% if let Some(e) = error %}<p class="alert" role="alert">{{ e }}</p>
+{% endif %}
+<section class="card" aria-labelledby="d-what">
+<h2 id="d-what">This release</h2>
+<dl class="facts">
+<dt>Title</dt><dd>{{ title }}</dd>
+<dt>Category</dt><dd>{{ category }}</dd>
+<dt>Size</dt><dd>{{ size }} in {{ file_count }} file(s); the NZB itself is {{ nzb_size }}</dd>
+</dl>
+<p><a href="/release/{{ id }}">Cancel and go back to the release</a></p>
+</section>
+
+<section class="card alerts" aria-labelledby="d-conf">
+<h2 id="d-conf">What deleting does</h2>
+<ul>
+<li>The release disappears from the index, search, statistics and the explorer, and can no longer be downloaded.</li>
+<li>Its NZB file is not erased: it is moved to the trash, where it stays restorable until you purge the trash from the Cleanup page. Restore it on the server with <code>nzbd trash restore</code>.</li>
+<li>Uploading or dropping the same file again creates a new release.</li>
+</ul>
+<form method="post" action="/release/{{ id }}/delete" autocomplete="off">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<input type="hidden" name="sha" value="{{ sha }}">
+<p><label for="del-confirm">Type <strong>{{ word }}</strong> to confirm</label><br>
+<input id="del-confirm" name="confirm" type="text" maxlength="16" autocomplete="off" required></p>
+<p><label for="del-password">Current password</label><br>
+<input id="del-password" name="current_password" type="password" maxlength="256" autocomplete="current-password" required></p>
+<p><label for="del-code">Authenticator code</label><br>
+<input id="del-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" pattern="[0-9 ]*" required></p>
+<p><button type="submit" class="danger">Delete release</button></p>
+</form>
+</section>
+{% endblock %}

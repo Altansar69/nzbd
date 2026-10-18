@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Health</h1>
+
+<section class="card" aria-labelledby="h-overall">
+<h2 id="h-overall">Overall</h2>
+<p role="status"><span class="badge {{ banner_class }}">{{ banner_label }}</span> {{ banner_text }}</p>
+<p class="muted">Checked {{ checked_at }}. The quick checks are refreshed at most every 15 seconds and never change any data. <a href="/admin">Back to Admin</a></p>
+</section>
+
+{% for g in groups %}<section class="card" aria-labelledby="h-{{ g.id }}">
+<h2 id="h-{{ g.id }}">{{ g.title }}</h2>
+<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">{{ g.title }} checks</caption>
+<thead><tr><th scope="col">Check</th><th scope="col" class="fit">Status</th><th scope="col">Value</th><th scope="col">What to do</th></tr></thead>
+<tbody>
+{% for r in g.rows %}<tr><td>{{ r.name }}</td><td class="fit"><span class="badge {{ r.class }}">{{ r.label }}</span></td><td>{{ r.value }}</td><td>{% if r.hint.is_empty() %}-{% else %}{{ r.hint }}{% endif %}</td></tr>
+{% endfor %}</tbody>
+</table>
+</div>
+</section>
+
+{% endfor %}<section class="card" aria-labelledby="h-deep">
+<h2 id="h-deep">Deep check</h2>
+{% if !deep_notice.is_empty() %}<p role="status">{{ deep_notice }}</p>
+{% endif %}<p class="muted">Runs the database integrity check and looks up every indexed release in the blob store (up to 50,000 releases). It can take a while on a large index and is read-only: nothing is repaired, moved or deleted.</p>
+{% if deep_enabled %}<form method="post" action="/admin/health/deep">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<button type="submit">Run deep check</button>
+</form>
+{% endif %}{% if deep_status == "running" %}<p role="status"><span class="badge">RUNNING</span> Started {{ deep_at }}. Reload this page in a minute.</p>
+{% else if deep_status == "done" %}<p>Result of the run finished {{ deep_at }} (shown for 10 minutes):</p>
+<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Deep check results</caption>
+<thead><tr><th scope="col">Check</th><th scope="col" class="fit">Status</th><th scope="col">Value</th><th scope="col">What to do</th></tr></thead>
+<tbody>
+{% for r in deep_rows %}<tr><td>{{ r.name }}</td><td class="fit"><span class="badge {{ r.class }}">{{ r.label }}</span></td><td>{{ r.value }}</td><td>{% if r.hint.is_empty() %}-{% else %}{{ r.hint }}{% endif %}</td></tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% else %}<p class="muted" role="status">No recent deep check.</p>
+{% endif %}</section>
+{% endblock %}

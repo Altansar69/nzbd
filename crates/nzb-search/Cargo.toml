@@ -1,0 +1,42 @@
+[package]
+name = "nzb-search"
+description = "Tantivy search index for nzbd v3: scene analyzer, bounded query builder, collectors, indexer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Search engine (D33 b, docs/v3/ARCHITECTURE.md section 12). Embedded library, MIT, no network. Pinned
+# exactly: every 0.x release changes the index format (= a rebuild, handled by the `schema` payload check).
+# `mmap` only: no stemmer/stopwords (scene names are not prose), no doc-store compression at all (there are
+# no stored fields; review I4 drops `lz4-compression`), no zstd columnar compression.
+tantivy = { version = "=0.26.2", default-features = false, features = ["mmap"] }
+# Already in the tree through tantivy (same versions, no new package): the term-dictionary `Automaton`
+# trait and the Levenshtein DFA, so fuzzy candidates are enumerated by OUR code under the M6 budgets
+# (tantivy keeps its own DFA wrapper crate-private, and `FuzzyTermQuery` would expand without a bound).
+tantivy-fst = "=0.5.0"
+levenshtein_automata = "=0.2.1"
+nzb-core = { path = "../nzb-core", version = "0.5.0" }
+nzb-store = { path = "../nzb-store", version = "0.5.0" }
+serde_json = "1"
+thiserror = "2"
+# Search semaphore (owned permit moved into the blocking closure), spawn_blocking, acquire timeout.
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+
+[features]
+# `testing::SettlingIndex` for the test suites of nzb-web, nzbd and the bench (read-your-writes over the indexer).
+test-support = ["nzb-store/pg-test-support"]  # the seam's test fixtures (FixtureRepo, review 35 I3)
+
+[dev-dependencies]
+# The Postgres test harness (`nzb_store::pg::testing`): the indexer, hydrator and degraded-browse adapters on
+# `Store` are tested against both backends (T122).
+nzb-store = { path = "../nzb-store", version = "0.5.0", features = ["pg-test-support"] }
+proptest = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

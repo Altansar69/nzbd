@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/nzb-core",
+  "crates/nzb-ingest",
+  "crates/nzb-search",
+  "crates/nzb-store",
+  "crates/nzb-testkit",
+  "crates/nzb-web",
+  "crates/nzbd",
+]
+# fuzz/ is its own project (nightly + libFuzzer); see fuzz/Cargo.toml.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+
+# Argon2id at m=64 MiB, t=3 is unusably slow unoptimised; password tests would take minutes.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# No `panic = "abort"` (T061 M-3): the ingest pipeline isolates a panicking job in its own tokio task and
+# quarantines it after bounded retries (nzb-ingest pipeline.rs, MAX_PANICS), and the HTTP stack contains
+# a handler panic to one request. Both rely on unwinding; with abort a single hostile file would crash-loop
+# the container. scripts/nightly.sh runs the isolation test under this very profile.

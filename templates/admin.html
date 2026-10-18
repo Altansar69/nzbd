@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Admin</h1>
+
+<section class="card" aria-labelledby="h-health">
+<h2 id="h-health">Health</h2>
+<dl class="facts">
+<dt>Database</dt><dd>{% if health.db_ok %}<span class="badge st-ok">OK</span>{% else %}<span class="badge st-bad">Fail - Unavailable</span>{% endif %}</dd>
+<dt>Watch-folder scan</dt><dd>{% if health.scan_ok %}<span class="badge st-ok">OK - Running</span>{% else %}<span class="badge st-warn">Warn - Stale</span>{% endif %} (last cycle {{ health.scan_age }})</dd>
+<dt>Ingest workers</dt><dd>{{ health.workers }} configured</dd>
+<dt>Last successful ingest</dt><dd>{{ health.last_ingest }}</dd>
+<dt>Full checks</dt><dd><a href="/admin/health">Open the health dashboard</a></dd>
+<dt>Disk space</dt><dd><a href="/admin/cleanup">Open Cleanup (trash, blocked and failed files)</a></dd>
+<dt>Blob store check</dt><dd class="muted">Not run here (it reads every blob). Use <code>nzbd store verify</code> on the host.</dd>
+</dl>
+</section>
+
+<section class="card" aria-labelledby="h-counters">
+<h2 id="h-counters">Counters</h2>
+{% if totals_known %}<dl class="facts">
+<dt>Releases</dt><dd>{{ counters.releases }}</dd>
+<dt>Files</dt><dd>{{ counters.files }}</dd>
+<dt>Total size</dt><dd>{{ counters.bytes }}</dd>
+</dl>
+{% else %}<p class="muted" role="status">Totals are currently unavailable.</p>
+{% endif %}<p class="muted">Since the process started:</p>
+<dl class="facts">
+<dt>Ingested</dt><dd>{{ counters.ok }}</dd>
+<dt>Duplicates</dt><dd>{{ counters.duplicates }}</dd>
+<dt>Failed</dt><dd>{{ counters.failed }}</dd>
+</dl>
+</section>
+
+<section class="card" aria-labelledby="h-log">
+<h2 id="h-log">Ingest log</h2>
+{% if log.is_empty() %}
+<p role="status">{% if page > 1 %}This page is empty. <a href="/admin">Back to the newest entries</a>.{% else %}Nothing has been ingested yet.{% endif %}</p>
+{% else %}
+<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Recent ingest log, newest first</caption>
+<thead><tr><th scope="col" class="fit">Time</th><th scope="col" class="fit">Source</th><th scope="col" class="fit">Outcome</th><th scope="col">Name</th><th scope="col" class="fit">Code</th><th scope="col">Detail</th></tr></thead>
+<tbody>
+{% for r in log %}<tr>
+<td class="fit">{{ r.time }}</td><td class="fit">{{ r.source }}</td>
+<td class="fit"><span class="badge">{{ r.outcome }}</span></td>
+<td>{% if let Some(id) = r.release_id %}<a href="/release/{{ id }}">{% if r.name.is_empty() %}(unnamed){% else %}{{ r.name }}{% endif %}</a>{% else %}{% if r.name.is_empty() %}(unnamed){% else %}{{ r.name }}{% endif %}{% endif %}</td>
+<td>{% if r.code.is_empty() %}-{% else %}<code>{{ r.code }}</code>{% endif %}</td>
+<td>{{ r.detail }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% endif %}
+{% if prev_page.is_some() || next_page.is_some() %}<nav class="pager" aria-label="Ingest log pages">
+{% if let Some(p) = prev_page %}<a href="/admin?page={{ p }}" rel="prev">Newer</a>{% endif %}
+<span>Page {{ page }}</span>
+{% if let Some(p) = next_page %}<a href="/admin?page={{ p }}" rel="next">Older</a>{% endif %}
+</nav>
+{% endif %}</section>
+
+<section class="card" aria-labelledby="h-failed">
+<h2 id="h-failed">Failed files</h2>
+{% if !failed_known %}<p class="muted" role="status">The failed folder could not be read.</p>
+{% else if failed.is_empty() %}<p role="status">No failed files.</p>
+{% else %}<p class="muted">{{ failed_total }} file(s) in the failed folder; newest {{ failed.len() }} shown. Retry them on the host with <code>nzbd failed retry</code>; reclaim their space on the <a href="/admin/cleanup">Cleanup</a> page.</p>
+<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Quarantined files, newest first</caption>
+<thead><tr><th scope="col">File</th><th scope="col" class="fit">Code</th><th scope="col" class="fit">Failed at</th><th scope="col" class="fit">Size</th></tr></thead>
+<tbody>
+{% for f in failed %}<tr><td>{{ f.name }}</td><td class="fit"><code>{{ f.code }}</code></td><td class="fit">{{ f.time }}</td><td class="fit">{{ f.size }}</td></tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% endif %}</section>
+
+<section class="card" aria-labelledby="h-audit">
+<h2 id="h-audit">Audit log</h2>
+{% if audit.is_empty() %}<p role="status">No audit events yet.</p>
+{% else %}<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Latest audit events, newest first</caption>
+<thead><tr><th scope="col" class="fit">Time</th><th scope="col" class="fit">Actor</th><th scope="col">Event</th><th scope="col" class="fit">Target</th><th scope="col">Detail</th><th scope="col" class="fit">Address</th></tr></thead>
+<tbody>
+{% for a in audit %}<tr><td class="fit">{{ a.time }}</td><td class="fit">{{ a.actor }}</td><td><code>{{ a.event }}</code></td><td class="fit">{{ a.target }}</td><td>{{ a.detail }}</td><td class="fit">{{ a.ip }}</td></tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% endif %}</section>
+
+<section class="card" aria-labelledby="h-config">
+<h2 id="h-config">Configuration</h2>
+<dl class="facts">
+{% for c in config %}<dt>{{ c.label }}</dt><dd>{{ c.value }}</dd>
+{% endfor %}</dl>
+<p class="muted">Secrets are never shown here.</p>
+</section>
+{% endblock %}

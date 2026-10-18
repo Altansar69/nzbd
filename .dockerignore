@@ -1,0 +1,16 @@
+target/
+.git/
+data/
+secrets/
+.DS_Store
+deploy/.env
+deploy/data/
+deploy/secrets/
+.claude/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+dist/
+.env
+*.key
+*.sqlite*

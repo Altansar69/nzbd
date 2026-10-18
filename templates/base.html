@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en" data-theme="{{ layout.theme }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ layout.title }} - nzbd</title>
+{% if let Some(t) = layout.csrf_token %}<meta name="csrf-token" content="{{ t }}">
+{% endif %}<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css?v={{ layout.css_ver }}">
+{% if let Some(v) = layout.htmx_ver %}<meta name="htmx-config" content="{&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false,&quot;includeIndicatorStyles&quot;:false,&quot;historyCacheSize&quot;:0,&quot;selfRequestsOnly&quot;:true}">
+<script src="/static/htmx.min.js?v={{ v }}" defer></script>
+{% endif %}<script src="/static/app.js?v={{ layout.js_ver }}" defer></script>
+</head>
+<body{% if !layout.authenticated %} class="bare"{% endif %}>
+<a class="skip" href="#main">Skip to content</a>
+{% if layout.authenticated %}<header class="topbar">
+<a class="brand" href="/">nzbd</a>
+<span class="pagename">{{ layout.title }}</span>
+<span class="spacer"></span>
+<details class="menu">
+<summary>Menu</summary>
+<nav aria-label="Main menu">
+{% include "nav_links.html" %}
+</nav>
+</details>
+<span class="who">{{ layout.who }} <span class="badge">{{ layout.role_label }}</span></span>
+<form method="post" action="/logout">
+{% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}<button type="submit">Log out</button>
+</form>
+</header>
+<div class="shell">
+<aside class="side">
+<nav aria-label="Main">
+{% include "nav_links.html" %}
+</nav>
+</aside>
+<div class="content">
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a> <span aria-hidden="true">&rsaquo;</span> {% if layout.nav_label == layout.title || layout.nav_label.is_empty() %}<span aria-current="page">{{ layout.title }}</span>{% else %}<a href="{% if layout.nav == "upload" %}/upload{% else if layout.nav == "admin" %}/admin{% else if layout.nav == "cleanup" %}/admin/cleanup{% else if layout.nav == "users" %}/admin/users{% else if layout.nav == "activity" %}/admin/activity{% else if layout.nav == "account" %}/account{% else %}/{% endif %}">{{ layout.nav_label }}</a> <span aria-hidden="true">&rsaquo;</span> <span aria-current="page">{{ layout.title }}</span>{% endif %}</nav>
+{% endif %}<main id="main">
+{% block content %}{% endblock %}
+</main>
+<div class="sitebar muted" role="contentinfo">nzbd {{ layout.version }} &middot; NZB index</div>
+{% if layout.authenticated %}</div>
+</div>
+{% endif %}</body>
+</html>

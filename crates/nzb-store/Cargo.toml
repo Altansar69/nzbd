@@ -1,0 +1,52 @@
+[package]
+name = "nzb-store"
+description = "SQLite repositories and NZB blob store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Backup encryption (T104): the RustCrypto AEAD, HMAC and zeroize that nzb-web already uses for TOTP
+# sealing; all three are already in Cargo.lock and compiled, so no new package.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hmac = "0.12"
+zeroize = "1"
+nzb-core = { path = "../nzb-core", version = "0.5.0" }
+# SQLite driver with bundled libsqlite3 (includes FTS5): the 2.x store, kept compiled until the v3 port is complete
+# (T112) and then only in `nzb-migrate` (T115). `postgres` (T112, D33): the v3 store; pure-Rust driver (no libpq),
+# SCRAM-SHA-256, arrays, COPY. No `tls-*` feature at all (review M5, owner question Q10): nzbd sets
+# `PgSslMode::Disable` explicitly and links no TLS stack.
+sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "sqlite"] }
+# NzbStore must be object-safe (FsStore now, DbStore later) with async methods; maintained, tiny.
+async-trait = "0.1"
+serde_json = "1"
+# StreamExt for the `COPY ... TO STDOUT` stream of the v3 snapshot backup (T112). Already in the lockfile and compiled
+# (sqlx-core, nzb-web dev); no default features.
+futures-util = { version = "0.3", default-features = false }
+# Already in the lockfile via sqlx; used to verify blob content against its address.
+sha2 = "0.10"
+# O_NOFOLLOW / ELOOP constants for no-follow opens (already in the lockfile via nzb-ingest); no unsafe.
+libc = "0.2"
+# `geteuid` for the SEC-042 / SEC-102 owner checks (review 44 M1: nzbd makes itself non-dumpable, after which
+# `/proc/self` is owned by root and no longer tells the process uid). Same version and features subset as nzbd's,
+# already in the lockfile; no new package, no unsafe.
+rustix = { version = "1.1.5", default-features = false, features = ["process", "std"] }
+thiserror = "2"
+# `rt`: spawn_blocking for filesystem work; `time`: migration progress heartbeat in `Db::open_with`
+# (both already enabled transitively by sqlx).
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+
+[dev-dependencies]
+# Already in the lockfile (nzb-core); the SQL-vs-Rust audit hash equality test (T112, SEC-080) is a proptest.
+proptest = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[features]
+# Exposes `nzb_store::pg::testing` (ephemeral per-test Postgres databases) to the test suites of other crates.
+pg-test-support = []

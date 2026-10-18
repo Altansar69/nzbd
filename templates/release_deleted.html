@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Release deleted</h1>
+<section class="card" aria-labelledby="dd-h">
+<h2 id="dd-h">Done</h2>
+<p class="notice" role="status">The release was removed from the index.</p>
+<p>Title: {{ title }}</p>
+{% if restorable %}<p>Its NZB file is in the trash (trash id {{ trash_id }}). It stays there until you purge the trash on the Cleanup page; to bring it back run <code>nzbd trash restore {{ trash_id }}</code> on the server.</p>
+{% else %}<p>No NZB file was found in the store for this release, so there is nothing to restore.</p>
+{% endif %}<p class="actions"><a class="button" href="/">Back to the index</a> <a href="/admin/cleanup">Cleanup</a></p>
+</section>
+{% endblock %}

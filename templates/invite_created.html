@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow">
+<h1>{{ heading }}</h1>
+<p><strong>Copy this code now.</strong> It is shown only once and cannot be displayed again; only a hash of it is stored.</p>
+<p class="qr"><code class="secret">{{ code }}</code></p>
+<dl class="facts">
+<dt>{% if is_recovery %}For{% else %}Username{% endif %}</dt><dd>{{ username }}</dd>
+<dt>Role</dt><dd>{{ role }}</dd>
+<dt>Expires</dt><dd>{{ expires }}</dd>
+{% if has_address %}<dt>Address</dt><dd><code>{{ invite_url }}</code></dd>
+{% else %}<dt>Address</dt><dd><code>{{ invite_url }}</code> <span class="muted">on this nzbd's address (not configured: set <code>server.public_url</code> to show the full address).</span></dd>
+{% endif %}</dl>
+{% if is_recovery %}<p>The code can be used once. Whoever redeems it chooses a new password and a new authenticator; nothing changes for the account until they confirm.</p>
+{% else %}<p>The code can be used once, by the person who should own the username above.</p>
+{% endif %}<p><a class="button" href="/admin/users">Back to Users</a></p>
+</section>
+{% endblock %}

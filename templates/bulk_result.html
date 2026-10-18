@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ heading }}</h1>
+<section class="card" aria-labelledby="br-h">
+<h2 id="br-h">Result</h2>
+<p class="notice" role="status">{{ summary }}</p>
+{% if !items.is_empty() %}<ul class="bulklist">
+{% for i in items %}<li>{{ i.title }}<br><span class="muted">{{ i.status }}</span></li>
+{% endfor %}</ul>
+{% endif %}<p class="muted">Listings and search show the change within a few seconds.</p>
+<p class="actions"><a class="button" href="/">Back to the index</a>{% if cleanup_link %} <a href="/admin/cleanup">Cleanup</a>{% endif %}</p>
+</section>
+{% endblock %}

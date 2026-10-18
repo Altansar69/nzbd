@@ -1,0 +1,170 @@
+# Production stack (docs/DEPLOYMENT.md), example/template: the SQLite backend (default: one nzbd container, the
+# database is a file in the data directory). deploy/install.sh renders it (plus compose.postgres.yaml for the
+# PostgreSQL backend, compose.external-proxy.yaml and your answers) into the self-contained deploy/compose.yaml you run with
+# `docker compose up -d` from deploy/ (docs/INSTALL.md / docs/RUNBOOK.md). Relative paths below are relative to
+# this directory (deploy/compose-example/). Paths/ports are overridable via env so scripts/deploy_check.sh can run
+# this very file from a temp dir.
+name: nzbd
+
+# Log rotation for every service (T061 L-1): on a Linux host Docker's default json-file driver has no size
+# limit, and the app logs one line per request.
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+services:
+  nzbd:
+    container_name: "${NZBD_NAME_PREFIX:-nzbd}"
+    image: ${NZBD_IMAGE:-nzbd:local}   # gates set NZBD_IMAGE to a per-run tag; operators keep :local
+    build: { context: ../.., dockerfile: deploy/Dockerfile }
+    # The container user (T128): install.sh asks for it (default: the UID:GID of whoever runs it) and stores it in
+    # .env; 10001:10001, the image's own user, when unset. Never 0 (install.sh and the volperms service refuse it, and
+    # nzbd refuses to run as root). The data directory and the volumes below are owned by it.
+    user: "${NZBD_UID:-10001}:${NZBD_GID:-10001}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    privileged: false
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    ulimits:
+      core: 0                 # password prompts hold plaintext in memory; never dump it
+    environment:
+      NZBD__server__listen: "0.0.0.0:8080"
+      # Single IPs only (no CIDR): must equal the fixed proxy address below.
+      NZBD__server__trusted_proxies: '["${NZBD_PROXY_IP:-172.30.0.2}"]'
+      # The proxy forwards the browser's Host (the site name); the app refuses any Host that is not
+      # localhost, an IP literal or listed here (DNS-rebinding defence), so the site name must be listed
+      # or every proxied page answers 400 BAD_HOST. Lowercase, no port.
+      NZBD__server__allowed_hosts: '["${NZBD_SITE:-nzbd.lan}"]'
+      # Every nzbd command in the container (serve and `docker compose exec nzbd /nzbd ...`) reads this file;
+      # the NZBD__* variables above are set by install.sh and override the same keys in the file.
+      NZBD_CONFIG_FILE: /etc/nzbd/config.toml
+      # serve.lock and the restore anchor (db-anchor.json) live on their own volume, NOT in the data directory: a
+      # snapshot or tar of the data directory must not roll the anchor back together with the database, or restore
+      # detection cannot fire (review 34 M3, docs/OPERATOR_SECURITY.md "Choosing a backend").
+      NZBD__paths__state: /state
+    volumes:
+      # The TOTP key lives in a named volume, written once by the `keygen` service as the container user with
+      # mode 0400. (A compose file-secret is a bind mount whose uid/mode compose ignores, and on Docker
+      # Desktop it shows up as root-owned, which the app's ownership check, SEC-042, rightly refuses.)
+      - nzbd_secrets:/run/secrets:ro
+      - ${NZBD_DATA_DIR:-../data}:/data   # watch/ store/ failed/ duplicates/ tmp/ backups/ index/ nzbd.sqlite
+      - nzbd_state:/state                  # paths.state (0700, the container user; volperms)
+      # Settings you edit on the host (deploy/config/nzbd.toml, created by install.sh; no secrets in it).
+      # Read-only in the container; restart nzbd after editing (`docker compose restart nzbd`).
+      - ${NZBD_CONFIG:-../config/nzbd.toml}:/etc/nzbd/config.toml:ro
+    networks: [back]          # internal only: no egress, nothing published
+    logging: *logging
+    # A scan cycle (hash, parse, index, move) can outlast Docker's default 10 s before SIGKILL (T061 L-14);
+    # the app drains in-flight work on SIGTERM and recovery is safe anyway, but do not rely on it.
+    stop_grace_period: 30s
+    # Sized for ~1M releases (docs/v3/PERFORMANCE.md 7.3): the memory-mapped search index is page cache charged to
+    # this container, so a tight limit costs speed, never safety. Never unlimited (owner Q7).
+    deploy:
+      resources:
+        limits: { memory: 2g, cpus: "2.0", pids: 256 }
+    restart: unless-stopped
+
+  # One-shot, run by hand: `docker compose --profile setup run --rm keygen`. Refuses to overwrite.
+  keygen:
+    profiles: [setup]
+    image: ${NZBD_IMAGE:-nzbd:local}   # gates set NZBD_IMAGE to a per-run tag; operators keep :local
+    user: "${NZBD_UID:-10001}:${NZBD_GID:-10001}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["keygen", "--out", "/run/secrets/nzbd_totp_key"]
+    volumes: ["nzbd_secrets:/run/secrets"]
+    network_mode: none        # generating a key needs no network at all
+    privileged: false
+    mem_limit: 64m
+    pids_limit: 32
+    logging: *logging
+    ulimits:
+      core: 0
+    restart: "no"
+
+  # One-shot, run by install.sh on every deploy before keygen (T128): `docker compose --profile setup run --rm
+  # volperms`.
+  # Hands NEW named volumes nzbd uses to the container user (NZBD_UID:NZBD_GID); refuses volumes holding files of
+  # another user and never re-owns or deletes anything (../volperms.sh). The pinned Caddy image of Dockerfile.proxy's
+  # `tools` stage (same digest, check_pins.sh) as root with only CHOWN, DAC_OVERRIDE, FOWNER; no network, read-only root.
+  volperms:
+    profiles: [setup]
+    image: caddy:2@sha256:f2a1290d0463aad60660d4ec134943f183ee2a5f6c3eb7bf32dd984f2f020772
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    privileged: false
+    network_mode: none
+    entrypoint: ["/bin/sh", "/volperms.sh"]
+    environment:
+      NZBD_UID: "${NZBD_UID:-10001}"
+      NZBD_GID: "${NZBD_GID:-10001}"
+    volumes:
+      - ../volperms.sh:/volperms.sh:ro
+      - nzbd_secrets:/v/secrets
+      - nzbd_state:/v/state
+    mem_limit: 64m
+    pids_limit: 32
+    logging: *logging
+    ulimits:
+      core: 0
+    restart: "no"
+
+  proxy:
+    container_name: "${NZBD_NAME_PREFIX:-nzbd}-proxy"
+    # Caddy compiled from source (committed deploy/proxy/go.mod + go.sum, digest-pinned Go toolchain image,
+    # build fails below Go 1.26.9 / x/net 0.60.0); see Dockerfile.proxy. The binary has no file capability,
+    # so it runs as uid 65532 with every capability dropped.
+    image: ${NZBD_PROXY_IMAGE:-nzbd-proxy:local}   # gates: NZBD_PROXY_IMAGE
+    build: { context: .., dockerfile: Dockerfile.proxy }
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    privileged: false
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /config:size=4m,uid=65532,gid=65532,mode=0700
+    ulimits:
+      core: 0                 # holds the bcrypt hash and the internal CA key in memory
+    environment:
+      NZBD_PROXY_USER: ${NZBD_PROXY_USER:?set NZBD_PROXY_USER in deploy/.env}
+      NZBD_PROXY_HASH: ${NZBD_PROXY_HASH:?set NZBD_PROXY_HASH in deploy/.env (single-quoted bcrypt hash)}
+      NZBD_SITE: ${NZBD_SITE:-nzbd.lan}
+    ports:
+      # LAN only: set NZBD_BIND to the LAN address; never 0.0.0.0 on a public host.
+      - "${NZBD_BIND:-127.0.0.1}:${NZBD_HTTPS_PORT:-443}:8443"
+    volumes:
+      - ../Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # internal CA + certs; initialised from the image, owned by 65532
+    networks:
+      front: {}
+      back: { ipv4_address: "${NZBD_PROXY_IP:-172.30.0.2}" }
+    deploy:
+      resources:
+        limits: { memory: 256m, cpus: "1.0", pids: 128 }
+    logging: *logging
+    depends_on: [nzbd]
+    restart: unless-stopped
+
+networks:
+  front: {}
+  back:
+    internal: true
+    # ip_range keeps dynamically assigned addresses away from the proxy's fixed one (otherwise the
+    # first container to start takes .2 and the proxy fails with "Address already in use").
+    ipam:
+      config:
+        - subnet: "${NZBD_BACK_SUBNET:-172.30.0.0/24}"
+          ip_range: "${NZBD_BACK_RANGE:-172.30.0.128/25}"
+
+# Short fixed names (owner decision): <P>_secrets, <P>_state, <P>_caddy with P = NZBD_NAME_PREFIX (default nzbd),
+# not Compose's project-prefixed ones. Tests set a unique prefix so isolated copies never touch a real stack.
+volumes:
+  caddy_data: { name: "${NZBD_NAME_PREFIX:-nzbd}_caddy" }
+  nzbd_secrets: { name: "${NZBD_NAME_PREFIX:-nzbd}_secrets" }
+  nzbd_state: { name: "${NZBD_NAME_PREFIX:-nzbd}_state" }

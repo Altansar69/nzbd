@@ -1,0 +1,165 @@
+# PostgreSQL backend (installer question "Database", answer 2; docs/DEPLOYMENT.md "Choosing a backend"). Merged by
+# deploy/install.sh on top of compose.yaml into the self-contained deploy/compose.yaml; never run on its own.
+#
+# What it adds (docs/v3/ARCHITECTURE.md 8, 8.1, 9; SECURITY_REVIEW 30 M1/M4/I3):
+#   postgres   digest-pinned PostgreSQL 18, NO network at all (network_mode: none, so no port exists to publish or
+#              reach); nzbd talks to it over the Unix socket in the `pg_socket` volume, mounted read-only into nzbd.
+#              Non-root (the image's uid 999), read-only root filesystem, every capability dropped, memory/CPU/pids
+#              limits, the security-relevant settings in ../postgres/postgresql.conf and ../postgres/pg_hba.conf
+#              (superuser by peer on the socket only, scram-sha-256 for the two nzbd roles, reject everything else).
+#   dbsecrets  one-shot (profile setup): generates the app, owner and superuser passwords once (never printed).
+#   setup      one-shot (profile setup): the ONLY container holding the owner role's secret. Runs
+#              `nzbd db migrate --yes` by default, and `db restore <file>` for a restore. Never mounted into nzbd
+#              (`serve` refuses to start if it can read an owner secret: OWNER_SECRET_VISIBLE).
+# Order on a new install (install.sh does it): volperms, keygen, dbsecrets, `up -d postgres`, `run --rm setup`, `up -d`.
+# On every upgrade with new migrations: build, volperms, `up -d postgres`, `run --rm setup`, `up -d` (docs/RUNBOOK.md).
+
+x-logging: &pg-logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+# The database settings of nzbd and of the setup service. db.host is the socket DIRECTORY (never a host name: no DNS);
+# pools sized for ~1M releases (web 8, ingest 2, background 2 + the indexer's lock connection; max_connections 30).
+x-pg-env: &pg-env
+  NZBD__db__backend: postgres
+  NZBD__db__host: /run/postgresql
+  NZBD__db__name: nzbd
+  NZBD__db__user: nzbd_app
+  NZBD__db__password_file: /run/secrets/nzbd_db_password
+  NZBD__db__pool_web: "8"
+  NZBD__db__pool_ingest: "2"
+  NZBD__db__pool_background: "2"
+
+services:
+  nzbd:
+    environment:
+      <<: *pg-env
+    volumes:
+      # Connecting to a Unix socket works on a read-only mount (review 30 I3): nzbd cannot create, replace or remove
+      # anything in the socket directory.
+      - pg_socket:/run/postgresql:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  postgres:
+    container_name: "${NZBD_NAME_PREFIX:-nzbd}-db"
+    # PostgreSQL 18 (17 is the supported minimum: nzb_store::pg::MIN_SERVER_VERSION_NUM). Same pin as the test
+    # server in compose.dev.yaml; bump both together (docs/DEPLOYMENT.md "Base image updates").
+    image: postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    user: "999:999"                 # the image's postgres uid: no root step, so no capability is needed
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    privileged: false
+    network_mode: none              # socket only: no interface but loopback, nothing to publish, no egress
+    shm_size: 256m                  # dynamic shared memory of parallel queries
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    ulimits:
+      core: 0                       # shared buffers hold password verifiers and account rows
+    environment:
+      PGDATA: /var/lib/postgresql/18/docker
+      # The entrypoint's init-time TEMPORARY server listens on socket port 5433; the real server listens on 5432
+      # (postgresql.conf), so neither the healthcheck nor nzbd can ever reach a half-initialized database.
+      # Operator psql: docker compose exec postgres psql -p 5432 -U postgres -d nzbd
+      PGPORT: "5433"
+      POSTGRES_DB: nzbd
+      POSTGRES_USER: postgres
+      # Required by the image's entrypoint; never usable to log in (pg_hba.conf: superuser by peer only).
+      POSTGRES_PASSWORD_FILE: /run/pg-secrets/superuser
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8 --auth-local=peer --auth-host=reject"
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    volumes:
+      - pg_data:/var/lib/postgresql
+      - pg_socket:/var/run/postgresql
+      - pg_secrets:/run/pg-secrets:ro
+      - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ../postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ../postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - ../../migrations/v3/superuser:/etc/nzbd-pg/superuser:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q", "-h", "/var/run/postgresql", "-p", "5432", "-d", "nzbd", "-U", "postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 120s
+    stop_grace_period: 60s          # the image stops with SIGINT (fast shutdown); a checkpoint can take a while
+    # ~1M releases (docs/v3/PERFORMANCE.md 7.3): shared_buffers 1GB inside a 2 GiB limit. Never unlimited (Q7).
+    deploy:
+      resources:
+        limits: { memory: 2g, cpus: "2.0", pids: 128 }
+    logging: *pg-logging
+    restart: unless-stopped
+
+  # One-shot, run by hand or by install.sh: `docker compose --profile setup run --rm dbsecrets`. Keeps existing secrets.
+  dbsecrets:
+    profiles: [setup]
+    image: postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    # root only to hand each file to its owner (the nzbd container user NZBD_UID:NZBD_GID, default 10001, for
+    # nzbd/setup; 999 for postgres): CHOWN, and DAC_OVERRIDE / FOWNER to write into and fix volumes owned by those uids.
+    # No network, read-only root, nothing else.
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    privileged: false
+    network_mode: none
+    entrypoint: ["/bin/bash", "/gen-secrets.sh"]
+    environment:
+      NZBD_SECRETS_APP_UID: "${NZBD_UID:-10001}"
+      NZBD_SECRETS_APP_GID: "${NZBD_GID:-10001}"
+    volumes:
+      - ../postgres/gen-secrets.sh:/gen-secrets.sh:ro
+      - nzbd_secrets:/out/app
+      - nzbd_setup_secrets:/out/setup
+      - pg_secrets:/out/pg
+    mem_limit: 64m
+    pids_limit: 32
+    ulimits:
+      core: 0
+    logging: *pg-logging
+    restart: "no"
+
+  # One-shot, the only holder of the owner secret: `docker compose --profile setup run --rm setup` (= db migrate --yes);
+  # restore: `docker compose --profile setup run --rm setup db restore /data/backups/<file>`.
+  setup:
+    profiles: [setup]
+    image: ${NZBD_IMAGE:-nzbd:local}   # gates set NZBD_IMAGE to a per-run tag; operators keep :local
+    user: "${NZBD_UID:-10001}:${NZBD_GID:-10001}"   # the nzbd container user, like serve (T128)
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    privileged: false
+    network_mode: none              # the socket is all it needs
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    ulimits:
+      core: 0
+    environment:
+      <<: *pg-env
+      NZBD_CONFIG_FILE: /etc/nzbd/config.toml
+    command: ["db", "migrate", "--yes"]
+    volumes:
+      - nzbd_setup_secrets:/run/setup-secrets:ro   # nzbd_db_owner_password: mounted HERE only (review 30 M4)
+      - nzbd_secrets:/run/secrets:ro               # a configured backup key, for `db restore` of an encrypted file
+      - pg_socket:/run/postgresql:ro
+      - ${NZBD_DATA_DIR:-../data}:/data            # tmp/ (decrypt scratch of `db restore`, removed before and after)
+      - ${NZBD_DATA_DIR:-../data}/backups:/data/backups:ro   # the restore source, read-only (review 36 I4)
+      - ${NZBD_CONFIG:-../config/nzbd.toml}:/etc/nzbd/config.toml:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: 1g
+    pids_limit: 64
+    logging: *pg-logging
+    restart: "no"
+
+  # The owner secret's volume belongs to the nzbd container user too (T128).
+  volperms:
+    volumes:
+      - nzbd_setup_secrets:/v/setup
+
+# Short fixed names, see compose.yaml (NZBD_NAME_PREFIX).
+volumes:
+  pg_data: { name: "${NZBD_NAME_PREFIX:-nzbd}_pg_data" }
+  pg_socket: { name: "${NZBD_NAME_PREFIX:-nzbd}_pg_socket" }
+  pg_secrets: { name: "${NZBD_NAME_PREFIX:-nzbd}_pg_secrets" }
+  nzbd_setup_secrets: { name: "${NZBD_NAME_PREFIX:-nzbd}_setup_secrets" }

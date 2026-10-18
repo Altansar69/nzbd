@@ -1,0 +1,3 @@
+[general]
+# Templates live at the repository root (docs/ARCHITECTURE.md), shared by all web code.
+dirs = ["../../templates"]

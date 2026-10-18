@@ -1,0 +1,195 @@
+# Token tables for nzb-core::scene (PARSER_SPEC §Data-driven tables).
+#
+# Keys are lowercase phrases of 1..=3 words; words are what the tokenizer yields after splitting
+# on `. _ space - [ ] ( ) { } ,` (so "WEB-DL" is the phrase "web dl", "DD5.1" is "dd5 1").
+# Values are the canonical labels. Structure (S01E02, years, dates, group suffix) is code, not data.
+# Validated at load: unknown enum values, empty/oversized/non-lowercase keys, and a year bound
+# that is out of range are errors; duplicate keys within a table are rejected by the TOML parser.
+
+# Latest year accepted as a release year (callers should override with clock-derived value).
+max_year = 2027
+
+[sources]
+"cam" = "CAM"
+"hdcam" = "CAM"
+"ts" = "TS"
+"hdts" = "TS"
+"telesync" = "TS"
+"tc" = "TC"
+"telecine" = "TC"
+"scr" = "SCR"
+"screener" = "SCR"
+"dvdscr" = "SCR"
+"r5" = "R5"
+"hdtv" = "HDTV"
+"pdtv" = "PDTV"
+"sdtv" = "SDTV"
+"dvdrip" = "DVDRip"
+"dvd rip" = "DVDRip"
+"dvd" = "DVD"
+"dvd5" = "DVD"
+"dvd9" = "DVD"
+"dvdr" = "DVD"
+"video ts" = "DVD"
+"complete ntsc dvd" = "DVD"
+"complete pal dvd" = "DVD"
+"webrip" = "WEBRip"
+"web rip" = "WEBRip"
+"web dl" = "WEBDL"
+"webdl" = "WEBDL"
+"web" = "WEBDL"
+"bdrip" = "BDRip"
+"bd rip" = "BDRip"
+"brrip" = "BDRip"
+"bluray" = "BluRay"
+"blu ray" = "BluRay"
+"bd25" = "CompleteBluray"
+"bd50" = "CompleteBluray"
+"bd66" = "CompleteBluray"
+"bd100" = "CompleteBluray"
+"bdmv" = "CompleteBluray"
+"complete bluray" = "CompleteBluray"
+"complete uhd bluray" = "CompleteBluray"
+"uhd bluray" = "UHDBluRay"
+"remux" = "Remux"
+
+[disc]
+# Full-disc releases (movies): BluRay -> 2050, DVD -> 2070.
+bluray = ["bd25", "bd50", "bd66", "bd100", "bdmv", "complete bluray", "complete uhd bluray"]
+dvd = ["dvdr", "dvd5", "dvd9", "video ts", "complete ntsc dvd", "complete pal dvd"]
+
+[three_d]
+tokens = ["3d", "hsbs", "h sbs", "hou", "h ou"]
+
+[resolutions]
+"480p" = "480p"
+"480i" = "480p"
+"576p" = "576p"
+"576i" = "576p"
+"720p" = "720p"
+"1080p" = "1080p"
+"1080i" = "1080p"
+"2160p" = "2160p"
+"4k" = "2160p"
+"uhd" = "2160p"
+"uhd bluray" = "2160p"
+"complete uhd bluray" = "2160p"
+
+[codecs]
+"x264" = "x264"
+"h264" = "h264"
+"h 264" = "h264"
+"avc" = "h264"
+"x265" = "x265"
+"h265" = "h265"
+"h 265" = "h265"
+"hevc" = "HEVC"
+"xvid" = "XviD"
+"divx" = "DivX"
+"av1" = "AV1"
+"vp9" = "VP9"
+"mpeg2" = "MPEG2"
+"vc1" = "VC-1"
+
+[audio]
+"dd5 1" = "DD5.1"
+"dd2 0" = "DD2.0"
+"ddp5 1" = "DDP5.1"
+"dd 5 1" = "DD5.1"
+"ac3" = "AC3"
+"eac3" = "EAC3"
+"aac" = "AAC"
+"dts" = "DTS"
+"dts hd" = "DTS-HD"
+"dts x" = "DTS-X"
+"truehd" = "TrueHD"
+"atmos" = "Atmos"
+"opus" = "Opus"
+"flac" = "FLAC"
+
+[hdr]
+"hdr" = "HDR"
+"hdr10" = "HDR10"
+"hdr10+" = "HDR10+"
+"hlg" = "HLG"
+"dv" = "DV"
+"dolby vision" = "DV"
+
+[languages]
+"multi" = "MULTi"
+"french" = "French"
+"truefrench" = "French"
+"vostfr" = "French"
+"vff" = "French"
+"vfq" = "French"
+"vf2" = "French"
+"subfrench" = "French"
+"german" = "German"
+"subgerman" = "German"
+"spanish" = "Spanish"
+"latino" = "Spanish"
+"italian" = "Italian"
+"dutch" = "Dutch"
+"swedish" = "Swedish"
+"norwegian" = "Norwegian"
+"danish" = "Danish"
+"finnish" = "Finnish"
+"polish" = "Polish"
+"russian" = "Russian"
+"japanese" = "Japanese"
+"korean" = "Korean"
+"hindi" = "Hindi"
+"portuguese" = "Portuguese"
+"swesub" = "Swedish"
+"nordic" = "Nordic"
+
+[flags]
+"proper" = "PROPER"
+"repack" = "REPACK"
+"rerip" = "REPACK"
+"real" = "REAL"
+"internal" = "INTERNAL"
+"readnfo" = "READNFO"
+"dirfix" = "DIRFIX"
+"nfofix" = "NFOFIX"
+"complete" = "COMPLETE"
+"extended" = "EXTENDED"
+"unrated" = "UNRATED"
+"dubbed" = "DUBBED"
+"subbed" = "SUBBED"
+
+[sports]
+tokens = [
+  "ufc", "wwe", "nfl", "nba", "nhl", "mlb", "formula1", "formula 1", "f1", "motogp",
+  "premier league", "uefa", "bundesliga", "laliga", "boxing",
+]
+
+[documentary]
+tokens = ["docu", "documentary"]
+
+[anime]
+# DUBBED/SUBBED are deliberately absent (see PARSER_SPEC drift note): German/French dubbed TV
+# releases would otherwise be classified as anime.
+markers = ["anime", "ova", "oav", "ona", "batch", "dual audio", "bd rip"]
+
+[music]
+mediums = [
+  "cd", "cds", "cdm", "cdep", "cdr", "2cd", "3cd", "4cd", "5cd", "6cd", "7cd", "8cd", "9cd",
+  "web", "vinyl", "lp", "12inch", "7inch", "tape", "sat", "cable", "dab", "dvda", "sacd",
+]
+audiobook = ["audiobook", "abook"]
+markers = ["ep", "single", "bootleg", "live", "promo", "va", "ost", "remastered", "deluxe"]
+min_year = 1950
+
+[music.formats]
+flac = "lossless"
+alac = "lossless"
+ape = "lossless"
+wav = "lossless"
+mp3 = "lossy"
+aac = "lossy"
+"320" = "lossy"
+"256" = "lossy"
+"192" = "lossy"
+v0 = "lossy"
+v2 = "lossy"

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+<h1>Upload results</h1>
+{% if rows.is_empty() %}<p class="muted" role="status">No file was selected.</p>{% else %}
+<div tabindex="0" class="tablewrap">
+<table>
+<thead><tr><th scope="col">File</th><th scope="col" class="fit">Result</th><th scope="col">Details</th></tr></thead>
+<tbody>
+{% for r in rows %}<tr>
+<th scope="row">{{ r.name }}</th>
+<td class="fit"><span class="badge st-{{ r.status_class }}">{{ r.status }}</span></td>
+<td>{% if let Some(id) = r.release_id %}<a href="/release/{{ id }}">Open release</a>{% else %}{% if !r.code.is_empty() %}<code>{{ r.code }}</code> {% endif %}{{ r.reason }}{% endif %}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+<p class="muted">New releases appear in the index and in search within a few seconds.</p>
+{% endif %}
+<p><a href="/upload">Upload more</a> · <a href="/">Back to the index</a></p>
+</section>
+{% endblock %}

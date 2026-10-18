@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Users</h1>
+{% if let Some(a) = alert %}<p class="alert" role="alert">{{ a }}</p>
+{% endif %}<p class="muted">Several accounts share one library. Uploaders and viewers are managed here; administrators are managed with the <code>nzbd</code> command line. At most {{ max_accounts }} accounts.</p>
+{% if registration %}<p class="actions"><a class="button" href="/admin/users/invite">Invite a user</a></p>
+{% endif %}
+
+<section class="card" aria-labelledby="h-users">
+<h2 id="h-users">Accounts</h2>
+<div tabindex="0" class="tablewrap wrap">
+<table class="users">
+<caption class="sr">Accounts, oldest first</caption>
+<thead><tr><th scope="col">Username</th><th scope="col">Display name</th><th scope="col">Email</th><th scope="col" class="fit">Role</th><th scope="col">Status</th><th scope="col" class="fit">Last login</th><th scope="col" class="fit">Sessions</th><th scope="col">Created by</th><th scope="col">Actions</th></tr></thead>
+<tbody>
+{% for u in users %}<tr{% if u.deleted %} class="muted"{% endif %}>
+{% if u.deleted %}<td data-label="Username">Deleted account #{{ u.id }}</td><td data-label="Display name">-</td><td data-label="Email">-</td><td class="fit" data-label="Role">{{ u.role }}</td><td data-label="Status">Deleted account</td><td class="fit" data-label="Last login">{{ u.last_login }}</td><td class="fit" data-label="Sessions">0</td><td data-label="Created by">{{ u.created_by }}</td><td class="act" data-label="Actions">-</td>
+{% else %}<td data-label="Username"><code>{{ u.username }}</code>{% if u.reserved_form %} <span class="badge st-warn">Reserved handle form</span>{% endif %}</td>
+<td data-label="Display name">{{ u.display }}</td>
+<td data-label="Email">{% if let Some(m) = u.email %}{{ m }}{% else %}<span class="muted">-</span>{% endif %}</td>
+<td class="fit" data-label="Role"><span class="badge">{{ u.role }}</span></td>
+<td data-label="Status"><div class="badges">{% if u.disabled %}<span class="badge st-bad">Disabled</span>{% else if u.online %}<span class="badge st-ok">Online</span>{% else %}<span class="badge">Offline</span>{% endif %}{% if u.locked %} <span class="badge st-warn">Locked</span>{% endif %}{% if u.mfa_missing %} <span class="badge st-warn">MFA not set up</span>{% endif %}</div>
+{% if let Some(r) = u.replaced %}<br><span class="muted">{{ r }}</span>{% endif %}{% if let Some(p) = u.recovery_pending %}<br><span class="badge st-warn">{{ p }}</span>{% endif %}</td>
+<td class="fit" data-label="Last login">{{ u.last_login }}</td><td class="fit" data-label="Sessions">{{ u.sessions }}</td><td data-label="Created by">{{ u.created_by }}</td>
+<td class="act" data-label="Actions"><div class="acts">
+{% if u.is_self %}<form method="post" action="/admin/users/{{ u.id }}/display-name" class="inline">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label class="sr" for="dn-{{ u.id }}">Display name</label><input id="dn-{{ u.id }}" name="display_name" type="text" maxlength="32" value="{{ u.display }}">
+<button type="submit">Set display name</button></form>
+{% if u.last_admin %}<p class="muted">Last administrator.</p>{% else %}<p class="muted">No other actions on your own account.</p>{% endif %}
+{% else if u.is_admin %}<p class="muted">Administrators are managed with the nzbd command line.</p>
+<a href="/admin/users/{{ u.id }}/revoke-sessions">Revoke sessions</a>
+{% else %}{% if u.disabled %}<a href="/admin/users/{{ u.id }}/enable">Enable</a>
+<a href="/admin/users/{{ u.id }}/delete">Delete</a>
+{% else %}<a href="/admin/users/{{ u.id }}/role">Change role</a>
+<form method="post" action="/admin/users/{{ u.id }}/disable" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Disable</button></form>
+<a href="/admin/users/{{ u.id }}/recover">Issue recovery code</a>
+{% endif %}{% if u.locked %}<form method="post" action="/admin/users/{{ u.id }}/unlock" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Clear lockout</button></form>
+{% endif %}<a href="/admin/users/{{ u.id }}/revoke-sessions">Revoke sessions</a>
+{% if u.recovery_pending.is_some() %}<form method="post" action="/admin/users/{{ u.id }}/recover/cancel" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Cancel recovery</button></form>
+{% endif %}<form method="post" action="/admin/users/{{ u.id }}/display-name" class="inline">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label class="sr" for="dn-{{ u.id }}">Display name</label><input id="dn-{{ u.id }}" name="display_name" type="text" maxlength="32" value="{{ u.display }}">
+<button type="submit">Set display name</button></form>
+{% endif %}</div></td>
+{% endif %}</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+</section>
+
+<section class="card" aria-labelledby="h-invites">
+<h2 id="h-invites">Open invitations and recovery codes</h2>
+{% if invites.is_empty() %}<p class="muted" role="status">None open.</p>
+{% else %}<div tabindex="0" class="tablewrap wrap">
+<table>
+<caption class="sr">Open invitations and recovery codes, newest first</caption>
+<thead><tr><th scope="col">Kind</th><th scope="col">For</th><th scope="col" class="fit">Role</th><th scope="col">Created by</th><th scope="col" class="fit">Expires</th><th scope="col">Action</th></tr></thead>
+<tbody>
+{% for i in invites %}<tr>
+<td>{{ i.kind }}</td><td>{{ i.subject }}</td><td class="fit">{{ i.role }}</td><td>{{ i.created_by }}</td><td class="fit">{{ i.expires }}</td>
+<td><form method="post" action="/admin/invites/{{ i.id }}/revoke" class="inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">Revoke</button></form></td>
+</tr>
+{% endfor %}</tbody>
+</table>
+</div>
+{% endif %}<p class="muted">Codes are shown once, when they are created, and are never listed.</p>
+</section>
+{% endblock %}
