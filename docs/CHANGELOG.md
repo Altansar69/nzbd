@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 (2026-10-18)
 
 ### Changed
 
@@ -13,6 +13,10 @@
 - **Traefik first.** The installer lists running Traefik containers first and recommends them; for any other proxy it
   skips every Traefik question.
 - `install.sh` refuses to run with `compose-example/` or `volperms.sh` from another release.
+
+### Fixed
+
+- The pinned hash of `app.css` (served as its ETag) matches the file again.
 
 ### Upgrading from 0.5.0
 

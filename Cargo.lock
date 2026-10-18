@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "nzb-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cap",
  "nzb-testkit",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "nzb-ingest"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "libc",
  "notify",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "nzb-search"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "levenshtein_automata",
  "nzb-core",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "nzb-store"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chacha20poly1305",
@@ -1660,11 +1660,11 @@ dependencies = [
 
 [[package]]
 name = "nzb-testkit"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "nzb-web"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "argon2",
  "askama",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "nzbd"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "axum",
  "base64 0.23.1",

@@ -16,7 +16,7 @@ workspace = true
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hmac = "0.12"
 zeroize = "1"
-nzb-core = { path = "../nzb-core", version = "0.5.0" }
+nzb-core = { path = "../nzb-core", version = "0.5.1" }
 # SQLite driver with bundled libsqlite3 (includes FTS5): the SQLite store. `postgres` (D33): the PostgreSQL store; pure-Rust driver (no libpq),
 # SCRAM-SHA-256, arrays, COPY. No `tls-*` feature at all (review M5, owner question Q10): nzbd sets
 # `PgSslMode::Disable` explicitly and links no TLS stack.

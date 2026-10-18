@@ -1,7 +1,7 @@
 # Third-party software
 
 nzbd itself is MIT-licensed ([LICENSE](LICENSE)). It is built from, and ships, the open-source components below, each under
-its own licence. This list is generated from the dependency tree of the `nzbd` binary (`cargo tree`, version 0.5.0) and the proxy's `deploy/proxy/go.mod`; the authoritative terms are in each component's own repository.
+its own licence. This list is generated from the dependency tree of the `nzbd` binary (`cargo tree`, version 0.5.1) and the proxy's `deploy/proxy/go.mod`; the authoritative terms are in each component's own repository.
 
 ## Proxy image (Go)
 

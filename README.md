@@ -6,7 +6,7 @@ them, explore their structure (files, segments, gaps) and download them again fr
 It never talks to Usenet and never makes an outbound connection. It is built to be small, boring and safe on your
 own network.
 
-Version **0.5.0** · Rust · SQLite or PostgreSQL · Tantivy ·
+Version **0.5.1** · Rust · SQLite or PostgreSQL · Tantivy ·
 Docker · [changelog](docs/CHANGELOG.md)
 
 **Fresh install only:** there is no upgrade path from earlier private versions. Install it with a new data directory and bring your NZB files over ([Quick install](docs/QUICK_INSTALL.md)).

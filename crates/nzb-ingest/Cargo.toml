@@ -13,8 +13,8 @@ workspace = true
 [dependencies]
 libc = "0.2"
 notify = { version = "8", default-features = false }
-nzb-core = { path = "../nzb-core", version = "0.5.0" }
-nzb-store = { path = "../nzb-store", version = "0.5.0" }
+nzb-core = { path = "../nzb-core", version = "0.5.1" }
+nzb-store = { path = "../nzb-store", version = "0.5.1" }
 # `nzbd import` (T115): a no-follow directory walk relative to directory descriptors (`openat`, `fstatat`, `Dir`)
 # through a safe API; std has no `openat`. Already in the lockfile and used by nzbd (same version and features).
 rustix = { version = "1.1.5", default-features = false, features = ["fs", "std"] }
@@ -33,10 +33,10 @@ tracing = "0.1.44"
 [dev-dependencies]
 # Test-only: seeds quarantine rows directly (same sqlx as nzb-store, already in the lockfile).
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
-nzb-testkit = { path = "../nzb-testkit", version = "0.5.0" }
+nzb-testkit = { path = "../nzb-testkit", version = "0.5.1" }
 # The backend matrix (NZBD_TEST_BACKEND) and the Postgres test harness (T122).
-nzb-store = { path = "../nzb-store", version = "0.5.0", features = ["pg-test-support"] }
+nzb-store = { path = "../nzb-store", version = "0.5.1", features = ["pg-test-support"] }
 # T131: ingest-to-search tests through the real indexer (`SettlingIndex`); workspace crate, no new package.
-nzb-search = { path = "../nzb-search", version = "0.5.0", features = ["test-support"] }
+nzb-search = { path = "../nzb-search", version = "0.5.1", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
