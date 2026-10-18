@@ -68,11 +68,21 @@ With choices 1 and 2 the installer can also attach your *running* proxy containe
 the printed compose snippet makes it permanent). Everything it generates for this is in `deploy/compose.yaml`
 and is rewritten from `.env` on every run.
 
-Both ask for the data directory, then for the **container user** and the **database**. Press Enter to accept the
-suggestion in brackets.
+Both ask for the **storage folder**, the **container user** and the **database** (with PostgreSQL also its database
+folder). Press Enter to accept the suggestion in brackets.
 
-**Container user.** nzbd runs as an unprivileged numeric user (UID) and group (GID); the data directory and the key
-volumes belong to it. The installer proposes **your own IDs** (the account running it; with `sudo ./install.sh`, the
+**Storage folder** (default `./storage`). Everything nzbd keeps goes in this one folder: the library in `data/` (NZB
+files, search index, SQLite database) and the keys, state and proxy certificates in `secrets/`, `state/` and `caddy/`
+(with PostgreSQL also `setup_secrets/` and `pg_secrets/`). Plain folders, not Docker volumes, so `docker compose down -v`
+and `docker volume prune` cannot delete them. Put it on a disk with space and back up the whole folder
+([RUNBOOK.md](RUNBOOK.md), section 2). Stored in `.env` as `NZBD_DATA_DIR=<folder>/data` and `NZBD_VOLUMES_DIR=<folder>`.
+
+**PostgreSQL database folder** (asked only when you choose PostgreSQL; default `<storage folder>/pg_data`). PostgreSQL
+creates its files inside it, owned by its uid 999 (mode 0700). Put it on a disk with space and fast I/O, outside
+`data/`. Stored as `NZBD_PG_DATA_DIR` in `.env`.
+
+**Container user.** nzbd runs as an unprivileged numeric user (UID) and group (GID); the data directory and the volumes
+directory belong to it. The installer proposes **your own IDs** (the account running it; with `sudo ./install.sh`, the
 account that called sudo), so you can read and add files in the data directory without sudo. Run as root, it proposes
 the image's own user `10001:10001` instead. Press Enter to accept, or type another `UID:GID` (two numbers, e.g.
 `1000:1000`); `0` (root), `999` (PostgreSQL's superuser by peer authentication), `65532` (the proxy), `65534`
@@ -80,7 +90,7 @@ the image's own user `10001:10001` instead. Press Enter to accept, or type anoth
 account owns the whole library, and media containers (SABnzbd, Sonarr ...) often run as `1000:1000`. With rootless
 Docker or userns-remap the installer proposes `10001:10001` (a container UID is not your host account there). The answer is stored in
 `.env` as `NZBD_UID` / `NZBD_GID` and shown in the summary. A kept `.env` without them is asked the same question.
-Pick it for a **fresh install**: if key volumes of an earlier install with another user exist, the installer stops and
+Pick it for a **fresh install**: if key folders of an earlier install with another user exist, the installer stops and
 tells you how to start fresh; it never re-owns or deletes them.
 
 | Database | What you get |
@@ -126,7 +136,7 @@ the build needs internet; the running stack has no outbound network.
 
 ## Afterwards
 
-- **Back up the encryption key** (Docker volume `nzbd_secrets`) separately from the database:
+- **Back up the encryption key** (the folder `storage/secrets`) separately from the database:
   [RUNBOOK.md](RUNBOOK.md), section 2. Without it nobody can finish an MFA login. Set a backup encryption key too
   (same section).
 - Check health: `docker compose exec nzbd /nzbd health`.
@@ -154,6 +164,7 @@ the build needs internet; the running stack has no outbound network.
 | Header audit says `answered 401` | Your proxy asks for its outer login first: add `--user <name>` (curl prompts for the password). |
 | Existing proxy cannot reach nzbd | The proxy container must be on the Docker network `nzbd_back` (the installer attaches it; add the snippet it printed to your proxy's compose file so it survives a re-create), and forward to `http://nzbd:8080`. |
 | `400 BAD_HOST` through your proxy | The proxy must forward the original `Host` header, and it must equal the host name you gave the installer. |
-| "the key volumes are not owned by UID:GID" | Key volumes of an earlier install with another `NZBD_UID:NZBD_GID` exist. Put that UID:GID back into `.env`, or start fresh: back up what you need, `docker compose --profile setup down -v` (deletes the TOTP key and the database volumes; the data directory stays), re-run `./install.sh`. |
+| "the key directories are not owned by UID:GID" | Key folders of an earlier install with another `NZBD_UID:NZBD_GID` exist. Put that UID:GID back into `.env`, or start fresh: back up what you need, remove the old stack and the volumes directory yourself (deletes the TOTP key and the database files; the data directory stays), re-run `./install.sh`. |
+| "old Docker volumes found" | An install from before the volumes directory kept its keys in Docker volumes. Copy them once into the folders (the installer prints the exact command, [CHANGELOG.md](CHANGELOG.md) 0.5.0), then re-run. |
 | Permission denied on the data directory from the host | It belongs to `NZBD_UID:NZBD_GID` (see `.env`). Use that account, or `sudo`. |
 | Proxy password lost (bundled proxy) | Re-run `./install.sh`, keep nothing, enter a new password (the old `.env` is saved as `.env.bak.*`). |

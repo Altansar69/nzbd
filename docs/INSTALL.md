@@ -11,7 +11,7 @@ into the new watch folder or use `nzbd import <dir>` ([RUNBOOK.md](RUNBOOK.md) s
 | | SQLite (default) | PostgreSQL |
 |---|---|---|
 | Containers | `nzbd` + `proxy` | `nzbd` + `proxy` + `postgres` (+ the one-shot `dbsecrets` and `setup`) |
-| Database | the file `data/nzbd.sqlite` | a PostgreSQL 18 cluster in the Docker volume `nzbd_pg_data`, no network, reached through a socket |
+| Database | the file `data/nzbd.sqlite` | a PostgreSQL 18 cluster in the folder `storage/pg_data`, no network, reached through a socket |
 | Fits | a personal or family library, ~1M releases | the same scale; a **shared or internet-facing** install: the database also binds a compromised nzbd (it cannot rewrite the audit history or delete accounts), which SQLite cannot do ([OPERATOR_SECURITY.md](OPERATOR_SECURITY.md) "Choosing a backend") |
 | Host | 2 cores, 4 GB RAM, SSD | 2-4 cores, 8 GB RAM, SSD |
 
@@ -48,10 +48,12 @@ Edit `deploy/.env`:
 | `NZBD_PROXY_HASH` | bcrypt hash of the proxy password, **single-quoted** (it contains `$`). | none (required) |
 | `NZBD_BIND` | Host address to publish on. Use the LAN IP of this host; never `0.0.0.0` on a host that faces the internet. | `127.0.0.1` |
 | `NZBD_HTTPS_PORT` | Published HTTPS port. | `443` |
-| `NZBD_DATA_DIR` | Host directory with the library, search index and (SQLite) database (bind mount). Use a **new** directory. | `deploy/data` (set an **absolute** path here: the template lives in `deploy/compose-example/`) |
+| `NZBD_DATA_DIR` | Host directory with the library, search index and (SQLite) database (bind mount). Use a **new** directory. | `deploy/storage/data` (set an **absolute** path here: the template lives in `deploy/compose-example/`) |
 | `NZBD_DB_BACKEND` | `sqlite` or `postgres`; chosen once, never switched for an existing library. | `sqlite` |
-| `NZBD_NAME_PREFIX` | Optional prefix of the named volumes and long-running containers (`<prefix>_secrets`, `<prefix>`, `<prefix>-proxy`, `<prefix>-db`); lowercase letters, digits, `_`, `-`. Only for a second stack on one host. | `nzbd` |
-| `NZBD_UID`, `NZBD_GID` | The numeric user and group nzbd runs as (`nzbd`, `keygen`, `setup`); the data directory and the key volumes belong to it. Use a dedicated account (`id -u`, `id -g` of it) to manage `data/` without sudo; do not share the ids of other containers (media apps often run as 1000:1000). 1 to 2147483646; not 0 (root), 999 (PostgreSQL's superuser by peer authentication), 65532 (the proxy) or 65534 (nobody). With rootless Docker or userns-remap use `10001:10001` (a container UID is not your host account there). Choose it for a fresh install: existing key volumes of another user are refused, never re-owned. | required (the installer proposes your own IDs) |
+| `NZBD_VOLUMES_DIR` | Host directory with the keys, state, proxy certificates and (PostgreSQL) database files: plain bind-mounted folders, not Docker volumes, so `docker compose down -v` cannot delete them. Not inside `NZBD_DATA_DIR`. Use an **absolute** path when you write it by hand. | `deploy/storage` (the installer asks) |
+| `NZBD_PG_DATA_DIR` | PostgreSQL only: host directory of the database files (uid 999, mode 0700). Not inside `NZBD_DATA_DIR`. | `<NZBD_VOLUMES_DIR>/pg_data` (the installer asks) |
+| `NZBD_NAME_PREFIX` | Optional prefix of the long-running containers (`<prefix>`, `<prefix>-proxy`, `<prefix>-db`) and of the PostgreSQL socket volume; lowercase letters, digits, `_`, `-`. Only for a second stack on one host. | `nzbd` |
+| `NZBD_UID`, `NZBD_GID` | The numeric user and group nzbd runs as (`nzbd`, `keygen`, `setup`); the storage folder (data directory and key folders) belongs to it. Use a dedicated account (`id -u`, `id -g` of it) to manage `data/` without sudo; do not share the ids of other containers (media apps often run as 1000:1000). 1 to 2147483646; not 0 (root), 999 (PostgreSQL's superuser by peer authentication), 65532 (the proxy) or 65534 (nobody). With rootless Docker or userns-remap use `10001:10001` (a container UID is not your host account there). Choose it for a fresh install: existing key folders of another user are refused, never re-owned. | required (the installer proposes your own IDs) |
 | `NZBD_PROXY_IP`, `NZBD_BACK_SUBNET`, `NZBD_BACK_RANGE` | Fixed proxy address and subnet of the internal network; change only if `172.30.0.0/24` collides with another Docker network. `NZBD_PROXY_IP` must be inside the subnet and outside the range. | `172.30.0.2`, `172.30.0.0/24`, `172.30.0.128/25` |
 
 Do not put `NZBD_IMAGE` / `NZBD_PROXY_IMAGE` in `.env` (the stack runs the images built from this tree, `nzbd:local` and
@@ -95,15 +97,15 @@ The app validates its directories and does not create them. They must exist and 
 `.env` (in `deploy/`: `IDS="$(sed -n 's/^NZBD_UID=//p' .env):$(sed -n 's/^NZBD_GID=//p' .env)"`):
 
 ```
-mkdir -p data/watch data/store data/failed data/duplicates data/tmp data/backups
-docker run --rm -u 0 --network none -e IDS="$IDS" -v "$PWD/data:/d" --entrypoint sh caddy:2 -c 'chown -hR "$IDS" /d && chmod -R u=rwX,go= /d'
+mkdir -p storage/data/watch storage/data/store storage/data/failed storage/data/duplicates storage/data/tmp storage/data/backups
+docker run --rm -u 0 --network none -e IDS="$IDS" -v "$PWD/storage/data:/d" --entrypoint sh caddy:2 -c 'chown -hR "$IDS" /d && chmod -R u=rwX,go= /d'
 ```
 
 (On a Linux host without Docker Desktop, `sudo chown -hR "$IDS" data && chmod -R u=rwX,go= data` does the same.
 Afterwards only that user can read `data/` on Linux: with your own IDs you add NZBs with a plain `cp`; with the image
 user `10001:10001`, through the UI or API, or with `sudo -u '#10001' cp`.)
 
-Then hand the new key volumes to the same user (once, before step 4; it refuses volumes holding files of another user
+Create the volumes directory (`mkdir -p "$NZBD_VOLUMES_DIR"/secrets "$NZBD_VOLUMES_DIR"/state "$NZBD_VOLUMES_DIR"/caddy`, plus `setup_secrets`, `pg_data` and `pg_secrets` with PostgreSQL; compose never creates them) and hand the folders to their users (once, before step 4; it refuses folders holding files of another user
 and never re-owns or deletes anything):
 
 ```
@@ -116,11 +118,11 @@ docker compose --profile setup run --rm volperms
 docker compose --profile setup run --rm keygen
 ```
 
-This builds the `nzbd` image if needed and writes `/run/secrets/nzbd_totp_key` (mode 0400, owned by `NZBD_UID`) into the Docker
-volume `nzbd_secrets`. It refuses to overwrite an existing key. **Back this key up now, separately from the database**
+This builds the `nzbd` image if needed and writes `/run/secrets/nzbd_totp_key` (mode 0400, owned by `NZBD_UID`) into the folder
+`storage/secrets`. It refuses to overwrite an existing key. **Back this key up now, separately from the database**
 (see [RUNBOOK §Backups](RUNBOOK.md)): without it nobody can finish an MFA login and you must reset MFA.
 
-Recommended: a **backup encryption key** too (`nzbd backup` then writes only encrypted files), in the same volume:
+Recommended: a **backup encryption key** too (`nzbd backup` then writes only encrypted files), in the same folder:
 
 ```
 docker compose --profile setup run --rm keygen keygen --out /run/secrets/nzbd_backup_key   # 0400, NZBD_UID
@@ -138,9 +140,9 @@ docker compose ps postgres                          # wait for "healthy"
 docker compose --profile setup run --rm setup       # nzbd db migrate --yes, with the owner role
 ```
 
-`dbsecrets` writes the app role's password into `nzbd_secrets` (read by nzbd), the owner role's password into
-`nzbd_setup_secrets` (mounted **only** into the one-shot `setup` service) and the server's copies into
-`nzbd_pg_secrets`. `setup` applies the schema; `nzbd serve` never migrates and refuses to start until it is done
+`dbsecrets` writes the app role's password into `storage/secrets` (read by nzbd), the owner role's password into
+`storage/setup_secrets` (mounted **only** into the one-shot `setup` service) and the server's copies into
+`storage/pg_secrets`. `setup` applies the schema; `nzbd serve` never migrates and refuses to start until it is done
 (`MIGRATIONS_PENDING`). Run `setup` again after every upgrade, with `nzbd` stopped (RUNBOOK section 5; `setup` refuses
 while nzbd is connected: `APP_SESSIONS_ACTIVE`).
 
@@ -154,10 +156,10 @@ docker compose ps          # nzbd should report "healthy" after the first health
 ## 6. Trust the proxy's internal CA
 
 Caddy issues the certificate for `NZBD_SITE` from its own CA. Fetch the root certificate and install it on the devices
-you browse from (the root's private key stays in the `nzbd_caddy` volume; install the root only where needed):
+you browse from (the root's private key stays in the `storage/caddy` folder; install the root only where needed):
 
 ```
-docker run --rm -v nzbd_caddy:/d:ro --entrypoint cat caddy:2 /d/caddy/pki/authorities/local/root.crt > nzbd-root.crt
+docker run --rm -v "$PWD/storage/caddy":/d:ro --entrypoint cat caddy:2 /d/caddy/pki/authorities/local/root.crt > nzbd-root.crt
 ```
 
 Install `nzbd-root.crt` as a trusted root with the usual OS procedure (macOS Keychain Access: System keychain, set
@@ -191,7 +193,7 @@ new token). See [RUNBOOK.md](RUNBOOK.md).
 
 ## 8. Feed it NZBs
 
-- **Watch folder**: put `.nzb` files into `deploy/data/watch/`. Write them under a hidden or `.part`/`.tmp` name and
+- **Watch folder**: put `.nzb` files into `deploy/storage/data/watch/`. Write them under a hidden or `.part`/`.tmp` name and
   rename when complete, or just copy: a file is only picked up after its size and mtime stay unchanged for 5 s. Indexed
   files are moved into `store/`; the original name is kept as the display name.
 - **UI**: `https://<NZBD_SITE>/upload` (several files, optional category and source label).
@@ -217,15 +219,17 @@ new token). See [RUNBOOK.md](RUNBOOK.md).
 - The container `HEALTHCHECK` runs `nzbd healthcheck` (a loopback probe of `/healthz`; the proxy answers 404 to
   `/healthz` from outside on purpose).
 
-## 10. What is stored where (volumes and mounts)
+## 10. What is stored where (folders and mounts)
 
-Everything nzbd keeps lives in a few named Docker volumes and one host directory. The volumes have short, fixed names
-(`<prefix>_secrets`, `<prefix>_state`, ...), not Compose's project-prefixed ones. The prefix is `nzbd` unless you set
-`NZBD_NAME_PREFIX` in `deploy/.env` (for example `NZBD_NAME_PREFIX=nzbd2 ./install.sh` for a second, separate stack on
-one host); the tables below use the default. The long-running containers are named the same way: `nzbd` (the app),
-`nzbd-proxy` and, with PostgreSQL, `nzbd-db`.
+Everything nzbd keeps lives in one storage folder (the installer default `deploy/storage`): the data directory `data/` and the key folders next to it (the volumes directory). All are plain
+bind mounts, so `docker compose down -v` and `docker volume prune` cannot delete them. The only Docker volume left is
+the PostgreSQL socket directory (`<prefix>_pg_socket`; nothing in it outlives the server). The installer asks two
+questions: the storage folder, and with PostgreSQL the database folder; it writes `NZBD_DATA_DIR=<folder>/data`,
+`NZBD_VOLUMES_DIR=<folder>` and `NZBD_PG_DATA_DIR` into `deploy/.env`. The long-running containers are named `nzbd`
+(the app), `nzbd-proxy` and, with PostgreSQL, `nzbd-db`; `NZBD_NAME_PREFIX` changes the prefix (for example
+`NZBD_NAME_PREFIX=nzbd2 ./install.sh` for a second, separate stack on one host).
 
-**Host directory (bind mount).** `data/` (path set by `NZBD_DATA_DIR`, default `deploy/../data`), owned by
+**Data directory.** `data/` (path set by `NZBD_DATA_DIR`, default `deploy/storage/data`), owned by
 `NZBD_UID:NZBD_GID`, mode 0700 or 0750. This is where the library lives:
 
 | Path in `data/` | Holds | Back it up? |
@@ -237,28 +241,29 @@ one host); the tables below use the default. The long-running containers are nam
 | `watch/` | The input folder you drop `.nzb` files into | No (files are moved out after indexing) |
 | `failed/`, `duplicates/`, `tmp/` | Rejected files, duplicate copies, upload staging | No |
 
-**Named volumes, SQLite install** (the default):
+**Volumes directory, SQLite install** (`storage/`, path set by `NZBD_VOLUMES_DIR`; keep it apart from `data/`):
 
-| Volume | Mounted in | Holds | Back it up? |
+| Folder | Mounted in | Holds | Back it up? |
 |---|---|---|---|
-| `nzbd_secrets` | `nzbd` (read-only) | The TOTP encryption key `nzbd_totp_key` and the optional backup encryption key | **Yes, separately from everything else and offline.** Without the TOTP key nobody can log in; without the backup key encrypted backups cannot be read |
-| `nzbd_state` | `nzbd` | `serve.lock` and `db-anchor.json` (the restore anchor), mode 0700 | Only as part of a full snapshot, see the [runbook](RUNBOOK.md) |
-| `nzbd_caddy` | `proxy` | The proxy's internal CA and certificates | Optional. If lost, a new CA is made and every device must trust the new root |
+| `storage/secrets` | `nzbd` (read-only) | The TOTP encryption key `nzbd_totp_key` and the optional backup encryption key | **Yes, separately from everything else and offline.** Without the TOTP key nobody can log in; without the backup key encrypted backups cannot be read |
+| `storage/state` | `nzbd` | `serve.lock` and `db-anchor.json` (the restore anchor), mode 0700 | Only as part of a full snapshot, see the [runbook](RUNBOOK.md) |
+| `storage/caddy` | `proxy` | The proxy's internal CA and certificates (owned by uid 65532, mode 0700) | Optional. If lost, a new CA is made and every device must trust the new root |
 
-**Extra volumes, PostgreSQL install:**
+**Extra folders, PostgreSQL install:**
 
-| Volume | Holds | Back it up? |
+| Folder | Holds | Back it up? |
 |---|---|---|
-| `nzbd_pg_data` | The PostgreSQL cluster (the database) | Use `nzbd backup` (a consistent snapshot export) |
-| `nzbd_pg_socket` | The Unix socket between nzbd and PostgreSQL (there is no network port) | No |
-| `nzbd_pg_secrets` | The server's copy of the generated database passwords | Keep the volume; not needed in backups |
-| `nzbd_setup_secrets` | The database owner password, mounted only into the one-shot `setup` service | Keep the volume; not needed in backups |
+| `storage/pg_data` (or `NZBD_PG_DATA_DIR`) | The PostgreSQL cluster (the database; owned by uid 999, mode 0700; the installer asks where) | Use `nzbd backup` (a consistent snapshot export) |
+| `storage/pg_secrets` | The server's copy of the generated database passwords | Keep the folder; not needed in backups |
+| `storage/setup_secrets` | The database owner password, mounted only into the one-shot `setup` service | Keep the folder; not needed in backups |
+| Docker volume `nzbd_pg_socket` | The Unix socket between nzbd and PostgreSQL (there is no network port) | No |
 
 Also mounted read-only from the host: `deploy/config/nzbd.toml` (your settings, no secrets) and `deploy/Caddyfile`.
 The proxy credentials are in `deploy/.env`: keep that file private and in your password manager.
 
-**Do not delete the secrets volumes.** `docker compose down` keeps all volumes and is safe. `docker compose down -v` and
-`docker volume rm nzbd_secrets` delete the key for good. What to back up, how often and how to restore:
+**Do not delete the secrets folder.** `docker compose down` and `docker compose down -v` leave `storage/` alone; only
+`rm -r storage/secrets` (or deleting the whole directory) deletes the key for good. `pg_data` and `caddy` belong to
+other users on the host: reading or archiving them needs root. What to back up, how often and how to restore:
 [RUNBOOK.md](RUNBOOK.md) (section 2, "Backups and restore").
 
 **Disk space.** Plan for your NZB library in `data/store/`, the database and the search index, and the snapshots in

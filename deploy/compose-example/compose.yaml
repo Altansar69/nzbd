@@ -47,9 +47,16 @@ services:
       # The TOTP key lives in a named volume, written once by the `keygen` service as the container user with
       # mode 0400. (A compose file-secret is a bind mount whose uid/mode compose ignores, and on Docker
       # Desktop it shows up as root-owned, which the app's ownership check, SEC-042, rightly refuses.)
-      - nzbd_secrets:/run/secrets:ro
-      - ${NZBD_DATA_DIR:-../data}:/data   # watch/ store/ failed/ duplicates/ tmp/ backups/ index/ nzbd.sqlite
-      - nzbd_state:/state                  # paths.state (0700, the container user; volperms)
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/secrets
+        target: /run/secrets
+        read_only: true
+        bind: { create_host_path: false }
+      - ${NZBD_DATA_DIR:-../storage/data}:/data   # watch/ store/ failed/ duplicates/ tmp/ backups/ index/ nzbd.sqlite
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/state
+        target: /state
+        bind: { create_host_path: false }   # paths.state (0700, the container user; volperms)
       # Settings you edit on the host (deploy/config/nzbd.toml, created by install.sh; no secrets in it).
       # Read-only in the container; restart nzbd after editing (`docker compose restart nzbd`).
       - ${NZBD_CONFIG:-../config/nzbd.toml}:/etc/nzbd/config.toml:ro
@@ -74,7 +81,11 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     command: ["keygen", "--out", "/run/secrets/nzbd_totp_key"]
-    volumes: ["nzbd_secrets:/run/secrets"]
+    volumes:
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/secrets
+        target: /run/secrets
+        bind: { create_host_path: false }
     network_mode: none        # generating a key needs no network at all
     privileged: false
     mem_limit: 64m
@@ -105,8 +116,18 @@ services:
       NZBD_GID: "${NZBD_GID:-10001}"
     volumes:
       - ../volperms.sh:/volperms.sh:ro
-      - nzbd_secrets:/v/secrets
-      - nzbd_state:/v/state
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/secrets
+        target: /v/secrets
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/state
+        target: /v/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/caddy
+        target: /as/65532/caddy
+        bind: { create_host_path: false }
     mem_limit: 64m
     pids_limit: 32
     logging: *logging
@@ -140,7 +161,10 @@ services:
       - "${NZBD_BIND:-127.0.0.1}:${NZBD_HTTPS_PORT:-443}:8443"
     volumes:
       - ../Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data      # internal CA + certs; initialised from the image, owned by 65532
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/caddy
+        target: /data
+        bind: { create_host_path: false }   # internal CA + certs, owned by 65532 (volperms)
     networks:
       front: {}
       back: { ipv4_address: "${NZBD_PROXY_IP:-172.30.0.2}" }
@@ -162,9 +186,7 @@ networks:
         - subnet: "${NZBD_BACK_SUBNET:-172.30.0.0/24}"
           ip_range: "${NZBD_BACK_RANGE:-172.30.0.128/25}"
 
-# Short fixed names (owner decision): <P>_secrets, <P>_state, <P>_caddy with P = NZBD_NAME_PREFIX (default nzbd),
-# not Compose's project-prefixed ones. Tests set a unique prefix so isolated copies never touch a real stack.
-volumes:
-  caddy_data: { name: "${NZBD_NAME_PREFIX:-nzbd}_caddy" }
-  nzbd_secrets: { name: "${NZBD_NAME_PREFIX:-nzbd}_secrets" }
-  nzbd_state: { name: "${NZBD_NAME_PREFIX:-nzbd}_state" }
+# The key, state and certificate directories are plain bind mounts under NZBD_VOLUMES_DIR (install.sh asks where), not
+# Docker volumes: `docker compose down -v` and `docker volume prune` cannot delete them. create_host_path is off, so a
+# missing directory is an error instead of a silently created empty (root-owned) one. The only named volume left is the
+# PostgreSQL socket directory (compose.postgres.yaml): nothing in it outlives the server.

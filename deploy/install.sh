@@ -3,7 +3,8 @@
 #
 # What it does, in order: checks Docker, asks a few questions (among them the database: SQLite, the default, or
 # PostgreSQL, and the UID:GID nzbd runs as: yours by default), writes deploy/.env (mode 0600), creates the data
-# directories and the key volumes owned by that UID:GID, generates the TOTP key
+# directories and the volumes directory (keys, state, certificates; plain host folders, no Docker volumes) owned by that
+# UID:GID, generates the TOTP key
 # and, with PostgreSQL, the database passwords (once, never shown), builds and starts the stack (PostgreSQL: the
 # database first, then the one-shot `setup` service applies the schema), waits until it is healthy,
 # exports the proxy root certificate and creates your user. If you already run a reverse proxy in Docker (Traefik,
@@ -177,8 +178,8 @@ ask_ids() {
 say_ids_intro() {
   local who
   say
-  say "${c_b}Container user${c_0}: nzbd runs as an unprivileged numeric user ID (UID) and group ID (GID). The data"
-  say "directory and the key volumes are owned by it, so the host account with that UID can read and add files in the"
+  say "${c_b}Container user${c_0}: nzbd runs as an unprivileged numeric user ID (UID) and group ID (GID). The"
+  say "storage folder is owned by it, so the host account with that UID can read and add files in the"
   say "data directory without sudo."
   case "$PROPOSED_WHY" in
     sudo)
@@ -247,12 +248,27 @@ traefik_middlewares() { # "count name" per middleware, most used first
     sort | uniq -c | sort -rn | awk '{print $1, $2}'
 }
 
+# proxy_kind CONTAINER: traefik | nginx | caddy | other, from the image name and, for a renamed or self-built image,
+# the image title label and the command it runs.
+proxy_kind() {
+  local s
+  s=$(docker inspect -f '{{.Config.Image}} {{index .Config.Labels "org.opencontainers.image.title"}} {{.Path}} {{join .Config.Cmd " "}}' "$1" 2>/dev/null |
+    tr -d '\000-\037\177' | tr 'A-Z' 'a-z')
+  case "$s" in *traefik*) echo traefik ;; *nginx*) echo nginx ;; *caddy*) echo caddy ;; *) echo other ;; esac
+}
+
 # ---- .env values: read back and re-validated --------------------------------------------------------
 ENVF=.env
 get() { sed -n "s/^$1=//p" "$ENVF" | head -n 1 | sed "s/^'//; s/'\$//"; }
-# The short fixed names of the volumes and containers (<prefix>_secrets, <prefix>_state, <prefix>_caddy, ...; containers
-# <prefix>, <prefix>-proxy, <prefix>-db). Default prefix nzbd; NZBD_NAME_PREFIX in .env changes it (tests, a second stack).
+# The short fixed names of the containers (<prefix>, <prefix>-proxy, <prefix>-db) and of the PostgreSQL socket volume.
+# Default prefix nzbd; NZBD_NAME_PREFIX in .env changes it (tests, a second stack).
 name_prefix() { local v; v=$(get NZBD_NAME_PREFIX 2>/dev/null); printf '%s' "${v:-nzbd}"; }
+# abs_path P: P as an absolute path without a trailing slash, relative paths against this directory.
+abs_path() { case "$1" in /*) printf '%s' "${1%/}" ;; *) printf '%s/%s' "$PWD" "${1#./}" ;; esac; }
+# volumes_dir: NZBD_VOLUMES_DIR from $ENVF, absolute (default ./storage).
+volumes_dir() { local v; v=$(get NZBD_VOLUMES_DIR 2>/dev/null); abs_path "${v:-./storage}"; }
+# pg_data_dir: NZBD_PG_DATA_DIR from $ENVF (PostgreSQL's database files), absolute; default <volumes dir>/pg_data.
+pg_data_dir() { local v; v=$(get NZBD_PG_DATA_DIR 2>/dev/null); if [ -n "$v" ]; then abs_path "$v"; else printf '%s/pg_data' "$(volumes_dir)"; fi; }
 bad_env() { die "$1 in $ENVF is invalid ($2). Fix or delete the line and re-run."; }
 # check_env: the answers are checked when typed, but .env is operator-edited (and can be copied or corrupted), so every
 # value is checked again with the same rules before it reaches a Traefik rule, a Go template, YAML or arithmetic.
@@ -290,6 +306,9 @@ check_env() {
   case "$v" in '' | [a-z0-9]*) ;; *) bad_env NZBD_NAME_PREFIX "lowercase letters, digits, _ and -, starting with a letter or digit" ;; esac
   case "$v" in *[!a-z0-9_-]*) bad_env NZBD_NAME_PREFIX "lowercase letters, digits, _ and -, starting with a letter or digit" ;; esac
   [ "${#v}" -le 30 ] || bad_env NZBD_NAME_PREFIX "at most 30 characters"
+  for k in NZBD_DATA_DIR NZBD_VOLUMES_DIR NZBD_PG_DATA_DIR; do
+    v=$(get "$k"); case "$v" in *[!A-Za-z0-9._/-]*) bad_env "$k" "letters, digits, . _ - and / only" ;; esac
+  done
   v=$(get NZBD_DB_BACKEND); case "$v" in '' | sqlite | postgres) ;; *) bad_env NZBD_DB_BACKEND "sqlite or postgres" ;; esac
   # T128: the container user, when present (need_ids below requires it where a stack is rendered or deployed).
   for k in NZBD_UID NZBD_GID; do
@@ -337,7 +356,7 @@ render_compose() {
   env_ids
   env -u COMPOSE_FILE -u COMPOSE_PROFILES NZBD_IMAGE=nzbd:local NZBD_PROXY_IMAGE=nzbd-proxy:local \
     NZBD_UID="$NZBD_UID" NZBD_GID="$NZBD_GID" NZBD_NAME_PREFIX="$(name_prefix)" \
-    NZBD_DATA_DIR="$1" NZBD_CONFIG="$2" docker compose --env-file "$ENVF" "${args[@]}" --profile setup config
+    NZBD_DATA_DIR="$1" NZBD_VOLUMES_DIR="$(volumes_dir)" NZBD_PG_DATA_DIR="$(pg_data_dir)" NZBD_CONFIG="$2" docker compose --env-file "$ENVF" "${args[@]}" --profile setup config
 }
 
 # emit_overlay: the compose overlay for an existing proxy on a shared network (choices 1 and 2), from NETNAME, APP_IP,
@@ -431,7 +450,7 @@ if [ "${1:-}" = --print-compose ]; then
   case "$(get NZBD_PROXY_NETMODE)" in new | existing) die "--print-compose renders the bundled proxy or choice 3 only (use --print-overlay)." ;; esac
   need_ids
   shell_image_warning
-  d=$(get NZBD_DATA_DIR); d=${d:-./data}; case "$d" in /*) ;; *) d="$PWD/${d#./}" ;; esac
+  d=$(get NZBD_DATA_DIR); d=${d:-./storage/data}; case "$d" in /*) ;; *) d="$PWD/${d#./}" ;; esac
   render_compose "$d" "$PWD/config/nzbd.toml"
   exit $?
 fi
@@ -451,7 +470,7 @@ emit_settings() {
   printf '# nzbd settings, mounted read-only into the container at /etc/nzbd/config.toml. Created once by\n'
   printf '# install.sh, never overwritten. Uncomment and change what you need, then apply with\n'
   printf '#   docker compose restart nzbd        (check first: docker compose exec nzbd /nzbd config check)\n'
-  printf '# Every key: docs/CONFIGURATION.md. Never put secrets here (keys are files in the nzbd_secrets volume).\n'
+  printf '# Every key: docs/CONFIGURATION.md. Never put secrets here (keys are files in the secrets folder of the storage folder).\n'
   printf '# install.sh sets server.listen, server.trusted_proxies and server.allowed_hosts as environment variables,\n'
   printf '# which override this file: change those by re-running ./install.sh.\n'
   printf '# Example: several accounts with invitations = under [security] below, add the line: multi_user = true\n'
@@ -510,6 +529,10 @@ docker compose version >/dev/null 2>&1 || die "Docker Compose v2 ('docker compos
 cv=$(docker compose version --short 2>/dev/null | sed 's/^v//; s/[^0-9.].*//')
 [ "$(printf '%s\n' 2.24.4 "$cv" | sort -V | head -n 1)" = 2.24.4 ] || die "Docker Compose $cv is too old: 2.24.4 or later is required."
 [ -f compose-example/compose.yaml ] && [ -f Dockerfile ] && [ -f Dockerfile.proxy ] || die "run this script from the deploy/ directory of the nzbd tree."
+# install.sh, volperms.sh and compose-example/ change together: a lone install.sh copied over an older tree would render
+# the old templates (Docker volumes instead of the volumes directory).
+grep -q 'NZBD_VOLUMES_DIR' compose-example/compose.yaml && grep -q '/as/' volperms.sh ||
+  die "compose-example/ or volperms.sh is older than this install.sh: copy the WHOLE deploy/ directory of the same release (or the whole tree), not install.sh alone."
 ok "docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo '?'), compose $(docker compose version --short 2>/dev/null || echo '?')"
 
 # The same digest-pinned caddy image the proxy is built from (hash-password, CA export, chown helper).
@@ -560,10 +583,13 @@ if [ "$write_env" = 1 ]; then
   say
   say "${c_b}Reverse proxy${c_0}: nzbd needs HTTPS and an outer login in front of it."
   cands=$(docker ps --format '{{.Names}}|{{.Image}}' | tr -d '\000-\011\013-\037\177' | grep -Ei 'traefik|nginx|caddy|haproxy' | grep -Evi "^nzbd[-_]|nzbd-proxy|^$(name_prefix)(-proxy|-db)?\\|" || true)
+  # Traefik is the recommended existing proxy (the installer configures its router, TLS and login through labels):
+  # Traefik containers are listed first, so the default answer "1" picks one when there is any.
+  cands=$({ printf '%s\n' "$cands" | grep -i traefik; printf '%s\n' "$cands" | grep -vi traefik; } | awk 'NF' || true)
   hasproxy=n
   if [ -n "$cands" ]; then
-    say "Found running proxy-like containers on this host:"
-    printf '%s\n' "$cands" | awk -F'|' '{printf "    %d) %s  (%s)\n", NR, $1, $2}'
+    say "Found running proxy-like containers on this host (Traefik first: recommended, configured for you):"
+    printf '%s\n' "$cands" | awk -F'|' '{t = (tolower($2) ~ /traefik/) ? "  <- Traefik, recommended" : ""; printf "    %d) %s  (%s)%s\n", NR, $1, $2, t}'
     hasproxy=y
   else
     say "No running proxy-like container (Traefik, nginx, Caddy, HAProxy) was found on this host."
@@ -582,9 +608,14 @@ if [ "$write_env" = 1 ]; then
       ask EXT_NAME "Name of your proxy container" ""
     fi
     { [ -n "$EXT_NAME" ] && docker inspect "$EXT_NAME" >/dev/null 2>&1; } || die "no running container named '$EXT_NAME'."
-    img=$(docker inspect -f '{{.Config.Image}}' "$EXT_NAME")
-    case "$img" in *[Tt]raefik*) EXT_KIND=traefik ;; *nginx*) EXT_KIND=nginx ;; *[Cc]addy*) EXT_KIND=caddy ;; *) EXT_KIND=other ;; esac
+    EXT_KIND=$(proxy_kind "$EXT_NAME")
     ok "using '$EXT_NAME' ($EXT_KIND); the bundled proxy will not be installed"
+    # Only Traefik is configured by this installer (labels: router, TLS, middlewares, basic auth); for any other proxy
+    # every Traefik question is skipped and you add the route to nzbd in your proxy's own configuration.
+    if [ "$EXT_KIND" != traefik ]; then
+      say "'$EXT_NAME' is not Traefik: the Traefik questions are skipped. After the deploy, point your proxy at nzbd"
+      say "(http://<nzbd address>:8080, Host '$SITE'); the summary at the end shows the address (docs/INSTALL.md)."
+    fi
     say "Your proxy becomes the outer gate: enable TLS there, and an auth layer if you want one."
     say "nzbd still requires its own password + TOTP."
     PUSER=unused
@@ -710,12 +741,23 @@ if [ "$write_env" = 1 ]; then
     ask PORT "HTTPS port" "443"
     case "$PORT" in *[!0-9]* | "") die "port must be a number." ;; esac
   fi
-  if [ "$LEGACY" = 1 ]; then ddef=./data-new; else ddef=./data; fi
+  # One folder for everything nzbd keeps (owner decision): the library in <folder>/data and the key, state and
+  # certificate folders next to it (<folder>/secrets, state, caddy; PostgreSQL: setup_secrets, pg_secrets). All plain
+  # host folders, no Docker volumes, so 'docker compose down -v' and 'docker volume prune' cannot delete them.
+  # NZBD_DATA_DIR and NZBD_VOLUMES_DIR in .env are derived from it (an operator can still split them by hand).
+  if [ "$LEGACY" = 1 ]; then rdef=./storage-new; else rdef=./storage; fi
+  say
+  say "${c_b}Storage folder${c_0}: everything nzbd keeps goes in one folder on this host: the library (data/: NZB files, search"
+  say "index, SQLite database) and the keys, state and proxy certificates (secrets/, state/, caddy/). Plain folders, not"
+  say "Docker volumes: 'docker compose down -v' and 'docker volume prune' cannot delete them. Put it on a disk with space"
+  say "and include the whole folder in your backups (docs/RUNBOOK.md)."
   while :; do
-    ask DATA "Data directory (NZB files, search index, SQLite database; keep it on a disk with space)" "$ddef"
-    case "$DATA" in "" | *[!A-Za-z0-9._/-]*) warn "use letters, digits, '.', '_', '-' and '/' only."; continue ;; esac
+    ask ROOT "Storage folder" "$rdef"
+    case "$ROOT" in "" | *[!A-Za-z0-9._/-]*) warn "use letters, digits, '.', '_', '-' and '/' only."; continue ;; esac
+    ROOT=${ROOT%/}; [ -n "$ROOT" ] || ROOT=/
+    DATA="${ROOT%/}/data"; VOLS=$ROOT
     if [ "$LEGACY" = 1 ] && same_dir "$DATA" "$OLD_DATA"; then
-      warn "'$DATA' is the data directory of an earlier install: it is never reused. Pick another one."; continue
+      warn "'$DATA' is the data directory of an earlier install: it is never reused. Pick another folder."; continue
     fi
     break
   done
@@ -738,6 +780,18 @@ if [ "$write_env" = 1 ]; then
   case "$PREV_BACKEND" in postgres) bdef=2 ;; *) bdef=1 ;; esac
   ask DBCHOICE "Choose" "$bdef"
   case "$DBCHOICE" in 1) DB_BACKEND=sqlite ;; 2) DB_BACKEND=postgres ;; *) die "answer 1 or 2." ;; esac
+  PGDATA_DIR=""
+  if [ "$DB_BACKEND" = postgres ]; then
+    say "PostgreSQL keeps its database files in their own folder (created inside the one you choose; owned by PostgreSQL's"
+    say "uid 999, mode 0700). Put it on a disk with space and fast I/O; it must not be inside the library (data/)."
+    while :; do
+      ask PGDATA_DIR "PostgreSQL database folder" "${VOLS%/}/pg_data"
+      case "$PGDATA_DIR" in "" | *[!A-Za-z0-9._/-]*) warn "use letters, digits, '.', '_', '-' and '/' only."; continue ;; esac
+      pa=$(abs_path "$PGDATA_DIR"); da=$(abs_path "$DATA")
+      case "$pa/" in "$da/"*) warn "the PostgreSQL directory must not be the data directory or inside it."; continue ;; esac
+      break
+    done
+  fi
   # A re-run never switches an existing library (ARCHITECTURE 13.5): the SQLite -> PostgreSQL move is deferred (D37).
   if [ -n "$PREV_BACKEND" ] && [ "$PREV_BACKEND" != "$DB_BACKEND" ]; then
     die "this install uses $PREV_BACKEND; switching the backend of an existing library is not supported in 0.5 (the move script is deferred). Answer $bdef, or deploy a new library from another directory."
@@ -763,12 +817,15 @@ if [ "$write_env" = 1 ]; then
     printf 'NZBD_BIND=%s\n' "$BIND"
     printf 'NZBD_HTTPS_PORT=%s\n' "$PORT"
     printf 'NZBD_DATA_DIR=%s\n' "$DATA"
-    printf '# The UID:GID nzbd runs as (never 0); the data directory and the key volumes belong to it. Chosen for a fresh\n'
-    printf '# install: existing key volumes are never re-owned (install.sh refuses volumes of another user).\n'
+    printf '# Keys, state, proxy certificates and database files: plain host folders (not Docker volumes), see docs/RUNBOOK.md.\n'
+    printf 'NZBD_VOLUMES_DIR=%s\n' "$VOLS"
+    printf '# The UID:GID nzbd runs as (never 0); the data directory and the volumes directory belong to it. Chosen for a fresh\n'
+    printf '# install: existing key directories are never re-owned (install.sh refuses directories of another user).\n'
     printf 'NZBD_UID=%s\n' "$NZBD_UID"
     printf 'NZBD_GID=%s\n' "$NZBD_GID"
     printf '# Database backend, chosen once (sqlite | postgres); a re-run never switches it.\n'
     printf 'NZBD_DB_BACKEND=%s\n' "$DB_BACKEND"
+    [ -z "$PGDATA_DIR" ] || printf '# PostgreSQL database files (plain host folder, uid 999).\nNZBD_PG_DATA_DIR=%s\n' "$PGDATA_DIR"
     # Volume and container names are <prefix>_secrets, <prefix>, ...; only written when you chose a prefix
     # (NZBD_NAME_PREFIX=... ./install.sh), the default is nzbd.
     [ -z "${NZBD_NAME_PREFIX:-}" ] || printf 'NZBD_NAME_PREFIX=%s\n' "$NZBD_NAME_PREFIX"
@@ -815,13 +872,28 @@ if [ -z "$(get NZBD_UID)" ] || [ -z "$(get NZBD_GID)" ]; then
   ok "NZBD_UID=$NZBD_UID and NZBD_GID=$NZBD_GID added to .env"
 fi
 
+# A kept .env from before the volumes directory existed: the keys then live in Docker volumes. Ask once and store the
+# answer; the copy of the old volumes is done below, before anything is created (nothing is migrated silently).
+if [ -z "$(get NZBD_VOLUMES_DIR)" ]; then
+  warn "$ENVF has no NZBD_VOLUMES_DIR: asking for it."
+  ask VOLS "Storage folder for the keys, state and certificates" "./storage"
+  case "$VOLS" in "" | *[!A-Za-z0-9._/-]*) die "use letters, digits, '.', '_', '-' and '/' only." ;; esac
+  envtmp=$(mktemp ./.env.XXXXXX) || die "cannot write in $PWD."
+  { grep -Ev '^NZBD_VOLUMES_DIR=' .env || true
+    printf '# Keys, state, proxy certificates and database files: plain host folders (not Docker volumes), see docs/RUNBOOK.md.\nNZBD_VOLUMES_DIR=%s\n' "$VOLS"; } >"$envtmp" ||
+    { rm -f "$envtmp"; die "cannot write in $PWD."; }
+  chmod 600 "$envtmp" && mv -f "$envtmp" .env
+  ok "NZBD_VOLUMES_DIR=$VOLS added to .env"
+fi
+
 # Read the effective values back so the later steps and the summary match the file, after checking them again.
 check_env
 need_ids
 env_ids
 SITE=$(get NZBD_SITE); BIND=$(get NZBD_BIND); PORT=$(get NZBD_HTTPS_PORT); DATA=$(get NZBD_DATA_DIR)
-SITE=${SITE:-nzbd.lan}; BIND=${BIND:-127.0.0.1}; PORT=${PORT:-443}; DATA=${DATA:-./data}
+SITE=${SITE:-nzbd.lan}; BIND=${BIND:-127.0.0.1}; PORT=${PORT:-443}; DATA=${DATA:-./storage/data}
 DB_BACKEND=$(get NZBD_DB_BACKEND); DB_BACKEND=${DB_BACKEND:-sqlite}
+VOLS_ABS=$(volumes_dir); PG_ABS=$(pg_data_dir)
 EXT_NAME=$(get NZBD_EXTERNAL_PROXY); EXT_KIND=$(get NZBD_EXTERNAL_PROXY_KIND)
 if [ -n "$EXT_NAME" ]; then MODE=external; else MODE=bundled; fi
 # With an existing proxy on a shared network (choices 1 and 2) nzbd is ONLY on that network: the private network
@@ -1007,10 +1079,9 @@ umask 077 # bundled proxy: holds the bcrypt hash of the proxy password, like .en
 mv compose.yaml.new compose.yaml
 env -u COMPOSE_FILE -u COMPOSE_PROFILES NZBD_IMAGE=nzbd:local NZBD_PROXY_IMAGE=nzbd-proxy:local docker compose config -q || die "the generated compose.yaml is invalid (see above)."
 ok "$PWD/compose.yaml written and valid"
-# The volume names are fixed by NZBD_NAME_PREFIX (explicit 'name:' in the template, default nzbd), no longer derived
-# from the Compose project; the written file must carry exactly the names the checks below use.
+# The written file must mount exactly the directory the checks below use.
 NAMEP=$(name_prefix)
-grep -qx "    name: ${NAMEP}_secrets" compose.yaml || die "compose.yaml does not name its key volume ${NAMEP}_secrets."
+grep -qx "        source: $VOLS_ABS/secrets" compose.yaml || die "compose.yaml does not mount $VOLS_ABS/secrets as the key directory."
 
 # ---- generate only: validate, show, stop ---------------------------------------------------------
 if [ "$DEPLOY" = 0 ]; then
@@ -1025,7 +1096,9 @@ if [ "$DEPLOY" = 0 ]; then
   say
   say "  Settings file:  $PWD/$CONF (edit on the host; docker compose restart nzbd)"
   say "  Runs as:        $NZBD_UID:$NZBD_GID (NZBD_UID:NZBD_GID in .env; never root)"
-  say "  Data directory: $DATA (created and owned by $NZBD_UID:$NZBD_GID at deploy, like the key volumes)"
+  say "  Data directory: $DATA (created and owned by $NZBD_UID:$NZBD_GID at deploy)"
+  say "  Volumes dir:    $VOLS_ABS (keys, state, certificates; plain folders, created at deploy)"
+  [ "$DB_BACKEND" != postgres ] || say "  PostgreSQL dir: $PG_ABS (database files, uid 999, created at deploy)"
   if [ "$DB_BACKEND" = postgres ]; then
     say "  Database:       PostgreSQL. At deploy: database passwords generated (dbsecrets), postgres started, schema"
     say "                  applied by the one-shot setup service, then nzbd started (docs/INSTALL.md)."
@@ -1042,47 +1115,49 @@ if [ "$DEPLOY" = 0 ]; then
 fi
 
 # ---- 3. data directories --------------------------------------------------------------------------
-# Fresh starts only (owner decision 2026-10-16): key volumes left by an install that ran as another UID:GID are never
+# Fresh starts only (owner decision 2026-10-16): key directories left by an install that ran as another UID:GID are never
 # re-owned. Checked before anything is changed (data directory included); the volperms step below refuses them too.
-# 0.5.0 renamed the volumes (nzbd_nzbd_secrets -> nzbd_secrets, nzbd_caddy_data -> nzbd_caddy, ...). An older install keeps its data in the old ones;
-# deploying now would silently create an empty key volume (a NEW TOTP key, locking every user out) next to them.
-legacy_volumes() {
-  local o n
-  for o in nzbd_nzbd_secrets:secrets nzbd_nzbd_state:state nzbd_nzbd_setup_secrets:setup_secrets nzbd_caddy_data:caddy; do
-    n="${NAMEP}_${o#*:}"; o=${o%%:*}
-    if [ "$o" != "$n" ] && docker volume inspect "$o" >/dev/null 2>&1 && ! docker volume inspect "$n" >/dev/null 2>&1; then
-      echo "$o $n"; return 0
+# Installs that kept the keys in Docker volumes (nzbd_nzbd_secrets, nzbd_secrets, ...) must copy them into the folders
+# once: deploying now would silently create an empty key folder (a NEW TOTP key, locking every user out) next to them.
+legacy_volumes() { # prints "<volume> <folder>" for the first old Docker volume whose folder does not exist yet
+  local o dst
+  for o in nzbd_nzbd_secrets:secrets nzbd_secrets:secrets nzbd_nzbd_state:state nzbd_state:state nzbd_nzbd_setup_secrets:setup_secrets \
+    nzbd_setup_secrets:setup_secrets nzbd_caddy_data:caddy nzbd_caddy:caddy nzbd_pg_data:pg_data nzbd_pg_secrets:pg_secrets; do
+    case "${o#*:}" in setup_secrets | pg_data | pg_secrets) [ "$DB_BACKEND" = postgres ] || continue ;; esac
+    dst="$VOLS_ABS/${o#*:}"; [ "${o#*:}" != pg_data ] || dst=$PG_ABS
+    if docker volume inspect "${o%%:*}" >/dev/null 2>&1 && [ ! -e "$dst" ]; then
+      echo "${o%%:*} $dst"; return 0
     fi
   done
   return 1
 }
-if lv=$(legacy_volumes); then
+if [ "$NAMEP" = nzbd ] && lv=$(legacy_volumes); then
   set -- $lv
-  say "An older install keeps its data in the Docker volume '$1'; this version names it '$2'."
-  say "Copy every old volume once, then re-run (docs/CHANGELOG.md 0.5.0):"
-  say "  docker volume create $2 && docker run --rm -v $1:/from:ro -v $2:/to alpine cp -a /from/. /to/"
-  say "(old to new: nzbd_nzbd_secrets -> ${NAMEP}_secrets, nzbd_nzbd_state -> ${NAMEP}_state, nzbd_caddy_data -> ${NAMEP}_caddy,"
-  say " nzbd_nzbd_setup_secrets -> ${NAMEP}_setup_secrets; the PostgreSQL volumes nzbd_pg_* keep their names)"
-  die "old volumes found; nothing was changed. Stop the old stack, copy the volumes, re-run."
+  say "An older install keeps its data in the Docker volume '$1'; this version keeps it in the folder '$2'."
+  say "Stop the old stack (docker compose stop), then copy every old volume once and re-run. For this volume:"
+  say "  mkdir -p '$2' && docker run --rm -u 0 -v $1:/from:ro -v '$2':/to --entrypoint sh $CADDY_IMG -c 'cp -a /from/. /to/'"
+  say "(old volume -> folder: nzbd_nzbd_secrets or nzbd_secrets -> secrets, nzbd_nzbd_state or nzbd_state -> state, nzbd_caddy_data or"
+  say " nzbd_caddy -> caddy; PostgreSQL: nzbd_nzbd_setup_secrets or nzbd_setup_secrets -> setup_secrets, nzbd_pg_data -> $PG_ABS,"
+  say " nzbd_pg_secrets -> pg_secrets. Skip the ones you do not have; the old volumes are left as a backup.)"
+  die "old Docker volumes found; nothing was changed. Copy them (above), then re-run."
 fi
-foreign_volumes() { # prints the first existing nzbd volume that holds files of another user
+foreign_volumes() { # prints the first existing key directory that holds files of another user
   local v
-  for v in "${NAMEP}_secrets" "${NAMEP}_state" "${NAMEP}_setup_secrets"; do
-    docker volume inspect "$v" >/dev/null 2>&1 || continue
-    if docker run --rm -u 0 --network none --read-only -e NZBD_UID="$NZBD_UID" -e NZBD_GID="$NZBD_GID" -v "$v:/v:ro" \
+  for v in secrets state setup_secrets; do
+    [ -d "$VOLS_ABS/$v" ] || continue
+    if docker run --rm -u 0 --network none --read-only -e NZBD_UID="$NZBD_UID" -e NZBD_GID="$NZBD_GID" -v "$VOLS_ABS/$v:/v:ro" \
       --entrypoint sh "$CADDY_IMG" -c 'find /v -mindepth 1 ! -name .nzbd-volume \( ! -user "$NZBD_UID" -o ! -group "$NZBD_GID" \) | grep -q .'; then
-      echo "$v"; return 0
+      echo "$VOLS_ABS/$v"; return 0
     fi
   done
   return 1
 }
 if fv=$(foreign_volumes); then
-  say "The Docker volume '$fv' holds files of another UID:GID: an earlier install ran as another user. nzbd never"
-  say "re-owns or deletes key volumes. Either put that UID:GID back into NZBD_UID / NZBD_GID in $PWD/.env, or start"
-  say "fresh: back up what you need (docs/RUNBOOK.md section 2), remove the old stack and its volumes yourself"
-  say "(docker compose --profile setup down -v: DELETES the TOTP key, the state and the database volumes; the data"
-  say "directory stays), then re-run ./install.sh."
-  die "the key volumes are not owned by $NZBD_UID:$NZBD_GID; nothing was changed."
+  say "The directory '$fv' holds files of another UID:GID: an earlier install ran as another user. nzbd never"
+  say "re-owns or deletes key directories. Either put that UID:GID back into NZBD_UID / NZBD_GID in $PWD/.env, or start"
+  say "fresh: back up what you need (docs/RUNBOOK.md section 2), remove the old stack and that folder yourself, then"
+  say "re-run ./install.sh."
+  die "the key directories are not owned by $NZBD_UID:$NZBD_GID; nothing was changed."
 fi
 
 step "3/9 Data directories (owned by $NZBD_UID:$NZBD_GID)"
@@ -1101,6 +1176,16 @@ docker run --rm -u 0 --network none --read-only --cap-drop ALL --cap-add CHOWN -
   --entrypoint sh "$CADDY_IMG" -c 'mkdir -p /d/watch /d/store /d/failed /d/duplicates /d/tmp /d/backups &&
     chown -hR "$NZBD_UID:$NZBD_GID" /d && chmod -R u=rwX,go= /d' || die "could not hand $DATA_ABS to $NZBD_UID:$NZBD_GID (see above)."
 ok "$DATA_ABS ready"
+# The volumes directory: plain folders (created here as the invoking user; volperms below hands them over). Compose never
+# creates them (create_host_path is off), so a deleted folder is an error, not a silent empty key directory.
+vdirs="secrets state caddy"; [ "$DB_BACKEND" != postgres ] || vdirs="$vdirs setup_secrets pg_secrets"
+mkdir -p "$VOLS_ABS" 2>/dev/null || die "cannot create '$VOLS_ABS' (permissions?). Create it first or pick another path."
+for d in $vdirs; do mkdir -p "$VOLS_ABS/$d" 2>/dev/null || die "cannot create '$VOLS_ABS/$d' (permissions?)."; done
+ok "$VOLS_ABS ready ($vdirs)"
+if [ "$DB_BACKEND" = postgres ]; then
+  mkdir -p "$PG_ABS" 2>/dev/null || die "cannot create '$PG_ABS' (permissions?). Create it first or pick another path."
+  ok "$PG_ABS ready (PostgreSQL database files; volperms hands it to uid 999)"
+fi
 
 # ---- 4. images ------------------------------------------------------------------------------------
 step "4/9 Building the images (5-10 minutes the first time; needs internet for this step only)"
@@ -1108,27 +1193,27 @@ docker compose build
 ok "images built"
 
 # ---- 5. TOTP key ----------------------------------------------------------------------------------
-step "5/9 Key volumes (owned by $NZBD_UID:$NZBD_GID) and TOTP encryption key"
-# The one-shot volperms service hands nzbd's NEW named volumes (keys, state; PostgreSQL: the owner secret) to the
-# container user. A volume holding files of another user (an earlier install with another NZBD_UID) is refused, never
+step "5/9 Key directories (owned by $NZBD_UID:$NZBD_GID) and TOTP encryption key"
+# The one-shot volperms service hands nzbd's key folders (keys, state; PostgreSQL: the owner secret) to the container
+# user and the proxy / PostgreSQL folders to their service users. A folder holding files of another user (an earlier install with another NZBD_UID) is refused, never
 # re-owned or deleted (deploy/volperms.sh).
 if ! docker compose --profile setup run --rm volperms; then
-  say "The key volumes belong to another UID:GID (an earlier install). nzbd never re-owns or deletes them. Either put"
+  say "The key directories belong to another UID:GID (an earlier install). nzbd never re-owns or deletes them. Either put"
   say "that UID:GID back into NZBD_UID / NZBD_GID in $PWD/.env, or start fresh: back up what you need, remove the old"
-  say "stack and its volumes yourself (docker compose --profile setup down -v: DELETES the TOTP key and the database"
-  say "volumes; the data directory stays), then re-run ./install.sh."
-  die "the key volumes are not owned by $NZBD_UID:$NZBD_GID; nothing was changed."
+  say "stack and $VOLS_ABS yourself (this deletes the TOTP key and the database files; the data directory stays),"
+  say "then re-run ./install.sh."
+  die "the key directories are not owned by $NZBD_UID:$NZBD_GID; nothing was changed."
 fi
-ok "key volumes owned by $NZBD_UID:$NZBD_GID"
-# key_exists FILE / key_ok FILE: FILE is in the key volume / the container user can read it. Both run AS that user
-# (volperms just gave it the volume; root without capabilities could not even enter the 0700 directory).
+ok "key directories owned by $NZBD_UID:$NZBD_GID"
+# key_exists FILE / key_ok FILE: FILE is in the key directory / the container user can read it. Both run AS that user
+# (volperms just gave it the directory; root without capabilities could not even enter the 0700 directory).
 key_exists() {
   docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-    -u "$NZBD_UID:$NZBD_GID" -v "${NAMEP}_secrets:/s:ro" --entrypoint test "$CADDY_IMG" -e "/s/$1" 2>/dev/null
+    -u "$NZBD_UID:$NZBD_GID" -v "$VOLS_ABS/secrets:/s:ro" --entrypoint test "$CADDY_IMG" -e "/s/$1" 2>/dev/null
 }
 key_ok() {
   docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-    -u "$NZBD_UID:$NZBD_GID" -v "${NAMEP}_secrets:/s:ro" --entrypoint test "$CADDY_IMG" -r "/s/$1" 2>/dev/null
+    -u "$NZBD_UID:$NZBD_GID" -v "$VOLS_ABS/secrets:/s:ro" --entrypoint test "$CADDY_IMG" -r "/s/$1" 2>/dev/null
 }
 if key_exists nzbd_totp_key; then
   key_ok nzbd_totp_key || die "the TOTP key exists but $NZBD_UID:$NZBD_GID cannot read it; nothing was deleted (docs/RUNBOOK.md, Troubleshooting)."
@@ -1137,7 +1222,7 @@ else
   docker compose --profile setup run --rm keygen
   key_ok nzbd_totp_key || die "the new TOTP key is not readable by $NZBD_UID:$NZBD_GID (see above)."
   ok "key generated"
-  warn "BACK UP the key volume now, separately from the database (docs/RUNBOOK.md section 2)."
+  warn "BACK UP $VOLS_ABS/secrets now, separately from the database (docs/RUNBOOK.md section 2)."
 fi
 
 # ---- 6. database (PostgreSQL only) ----------------------------------------------------------------
@@ -1219,7 +1304,7 @@ if [ "$MODE" = external ]; then
   ok "skipped: TLS is handled by your own proxy"
 else
   for _ in $(seq 1 30); do
-    if docker run --rm -v "${NAMEP}_caddy:/d:ro" --entrypoint cat "$CADDY_IMG" /d/caddy/pki/authorities/local/root.crt >"$CRT" 2>/dev/null && [ -s "$CRT" ]; then break; fi
+    if docker run --rm -v "$VOLS_ABS/caddy:/d:ro" --entrypoint cat "$CADDY_IMG" /d/caddy/pki/authorities/local/root.crt >"$CRT" 2>/dev/null && [ -s "$CRT" ]; then break; fi
     rm -f "$CRT"; sleep 2
   done
   if [ -s "$CRT" ]; then ok "saved $PWD/$CRT (install it as a trusted root on the devices you browse from)"; else warn "root certificate not available yet; see docs/INSTALL.md step 6."; fi
@@ -1319,7 +1404,7 @@ TRAEFIK
   esac
   say
   say "  NZBs:        drop .nzb files into $DATA_ABS/watch/  (or use the Upload page)"
-  say "  Runs as:     $NZBD_UID:$NZBD_GID (owner of $DATA_ABS and the key volumes; NZBD_UID/NZBD_GID in .env)"
+  say "  Runs as:     $NZBD_UID:$NZBD_GID (owner of $DATA_ABS and $VOLS_ABS; NZBD_UID/NZBD_GID in .env)"
   say "  Settings:    $PWD/config/nzbd.toml (edit on the host, then: docker compose restart nzbd)"
   say "  Health:      docker compose exec nzbd /nzbd health"
   say "  Next:        docs/RUNBOOK.md (backups, restore, upgrade)"
@@ -1351,7 +1436,7 @@ cat <<EOF
 ${c_g}${c_b}nzbd is running.${c_0}
 
   Open:        $url/
-  Runs as:     $NZBD_UID:$NZBD_GID (owner of $DATA_ABS and the key volumes; NZBD_UID/NZBD_GID in .env)
+  Runs as:     $NZBD_UID:$NZBD_GID (owner of $DATA_ABS and $VOLS_ABS; NZBD_UID/NZBD_GID in .env)
   Make sure:   '$SITE' resolves to $BIND on your devices (LAN DNS or a hosts entry)
   Trust:       $PWD/$CRT   (install as a trusted root certificate)
   Log in:      proxy user/password first, then your nzbd user + the one-time token, then scan the QR code

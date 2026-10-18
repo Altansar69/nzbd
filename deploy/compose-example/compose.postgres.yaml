@@ -69,9 +69,16 @@ services:
       POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8 --auth-local=peer --auth-host=reject"
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     volumes:
-      - pg_data:/var/lib/postgresql
+      - type: bind
+        source: ${NZBD_PG_DATA_DIR:-${NZBD_VOLUMES_DIR:-../storage}/pg_data}
+        target: /var/lib/postgresql
+        bind: { create_host_path: false }
       - pg_socket:/var/run/postgresql
-      - pg_secrets:/run/pg-secrets:ro
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/pg_secrets
+        target: /run/pg-secrets
+        read_only: true
+        bind: { create_host_path: false }
       - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
       - ../postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ../postgres/initdb:/docker-entrypoint-initdb.d:ro
@@ -110,9 +117,18 @@ services:
       NZBD_SECRETS_APP_GID: "${NZBD_GID:-10001}"
     volumes:
       - ../postgres/gen-secrets.sh:/gen-secrets.sh:ro
-      - nzbd_secrets:/out/app
-      - nzbd_setup_secrets:/out/setup
-      - pg_secrets:/out/pg
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/secrets
+        target: /out/app
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/setup_secrets
+        target: /out/setup
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/pg_secrets
+        target: /out/pg
+        bind: { create_host_path: false }
     mem_limit: 64m
     pids_limit: 32
     ulimits:
@@ -139,11 +155,19 @@ services:
       NZBD_CONFIG_FILE: /etc/nzbd/config.toml
     command: ["db", "migrate", "--yes"]
     volumes:
-      - nzbd_setup_secrets:/run/setup-secrets:ro   # nzbd_db_owner_password: mounted HERE only (review 30 M4)
-      - nzbd_secrets:/run/secrets:ro               # a configured backup key, for `db restore` of an encrypted file
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/setup_secrets
+        target: /run/setup-secrets   # nzbd_db_owner_password: mounted HERE only (review 30 M4)
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/secrets
+        target: /run/secrets   # a configured backup key, for `db restore` of an encrypted file
+        read_only: true
+        bind: { create_host_path: false }
       - pg_socket:/run/postgresql:ro
-      - ${NZBD_DATA_DIR:-../data}:/data            # tmp/ (decrypt scratch of `db restore`, removed before and after)
-      - ${NZBD_DATA_DIR:-../data}/backups:/data/backups:ro   # the restore source, read-only (review 36 I4)
+      - ${NZBD_DATA_DIR:-../storage/data}:/data            # tmp/ (decrypt scratch of `db restore`, removed before and after)
+      - ${NZBD_DATA_DIR:-../storage/data}/backups:/data/backups:ro   # the restore source, read-only (review 36 I4)
       - ${NZBD_CONFIG:-../config/nzbd.toml}:/etc/nzbd/config.toml:ro
     depends_on:
       postgres: { condition: service_healthy }
@@ -155,11 +179,17 @@ services:
   # The owner secret's volume belongs to the nzbd container user too (T128).
   volperms:
     volumes:
-      - nzbd_setup_secrets:/v/setup
+      - type: bind
+        source: ${NZBD_VOLUMES_DIR:-../storage}/setup_secrets
+        target: /v/setup
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${NZBD_PG_DATA_DIR:-${NZBD_VOLUMES_DIR:-../storage}/pg_data}
+        target: /as/999/pg_data
+        bind: { create_host_path: false }
 
-# Short fixed names, see compose.yaml (NZBD_NAME_PREFIX).
+# Only the socket directory is a named volume (short fixed name, see compose.yaml); the secrets and the owner secret are
+# bind mounts under NZBD_VOLUMES_DIR, the database files under NZBD_PG_DATA_DIR (default <volumes dir>/pg_data; install.sh
+# asks for it).
 volumes:
-  pg_data: { name: "${NZBD_NAME_PREFIX:-nzbd}_pg_data" }
   pg_socket: { name: "${NZBD_NAME_PREFIX:-nzbd}_pg_socket" }
-  pg_secrets: { name: "${NZBD_NAME_PREFIX:-nzbd}_pg_secrets" }
-  nzbd_setup_secrets: { name: "${NZBD_NAME_PREFIX:-nzbd}_setup_secrets" }

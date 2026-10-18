@@ -50,7 +50,7 @@ administrator account; with `security.multi_user = true`, invite-only uploaders 
 | Understand how it works | [How it works](docs/HOW_IT_WORKS.md) |
 | Tune settings | [Configuration reference](docs/CONFIGURATION.md) |
 | Back up, restore, upgrade, troubleshoot | [Runbook](docs/RUNBOOK.md) |
-| Know which volumes to keep and back up (short fixed names `nzbd_secrets`, `nzbd_state`, ...; `NZBD_NAME_PREFIX` changes the prefix) | [Install guide, section 10](docs/INSTALL.md#10-what-is-stored-where-volumes-and-mounts) |
+| Know which folders to keep and back up (the storage folder: plain host folders that `docker compose down -v` cannot delete) | [Install guide, section 10](docs/INSTALL.md#10-what-is-stored-where-folders-and-mounts) |
 | Know what protects it | [Operator security notes](docs/OPERATOR_SECURITY.md) |
 
 ## Legal note

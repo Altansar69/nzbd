@@ -4,19 +4,21 @@ Audience: the person who deployed nzbd with the [install guide](INSTALL.md). Eve
 against the production image unless marked otherwise. Conventions:
 
 - Commands run in `nzbd/deploy/` (where `compose.yaml` and `.env` live; settings in `config/nzbd.toml`, applied by
-  `docker compose restart nzbd`). The volumes have short fixed names
-  (prefix `nzbd`, or `NZBD_NAME_PREFIX` in `.env`) and the containers are `nzbd`, `nzbd-proxy` and `nzbd-db`:
-  the volumes are `nzbd_secrets` (TOTP key, backup key, PostgreSQL app password), `nzbd_state` (`paths.state`:
-  `serve.lock` and the restore anchor) and `nzbd_caddy` (proxy CA); with PostgreSQL also `nzbd_pg_data` (the
-  cluster), `nzbd_pg_socket`, `nzbd_pg_secrets` and `nzbd_setup_secrets` (the owner password, mounted only into the
-  one-shot `setup` service). Check with `docker volume ls`. `NZBD_DB_BACKEND` in `.env` says which backend you run;
+  `docker compose restart nzbd`). The containers are `nzbd`, `nzbd-proxy` and `nzbd-db` (prefix `nzbd`, or
+  `NZBD_NAME_PREFIX` in `.env`). Keys, state and certificates are plain folders under the **volumes directory**
+  (`NZBD_VOLUMES_DIR` in `.env`, default `deploy/storage`; set `VOLS` to it in your shell, as an absolute path):
+  `secrets` (TOTP key, backup key, PostgreSQL app password), `state` (`paths.state`: `serve.lock` and the restore
+  anchor) and `caddy` (proxy CA); with PostgreSQL also `pg_data` (the cluster, owned by uid 999), `pg_secrets` and
+  `setup_secrets` (the owner password, mounted only into the one-shot `setup` service). They are bind mounts, not Docker
+  volumes: `docker compose down -v` cannot delete them. The only Docker volume is `nzbd_pg_socket` (PostgreSQL socket;
+  nothing in it outlives the server). `NZBD_DB_BACKEND` in `.env` says which backend you run;
   where the two differ this runbook says **SQLite** or **PostgreSQL**.
 - **The container user.** nzbd runs as `NZBD_UID:NZBD_GID` from `.env` (T128; the installer proposed the IDs of the
   account that ran it, or `10001:10001` when run as root or with rootless Docker / userns-remap). The commands below
   use it as `$IDS`; set it once per shell, in `deploy/`:
   `IDS="$(sed -n 's/^NZBD_UID=//p' .env):$(sed -n 's/^NZBD_GID=//p' .env)"`. "The container user" in the text means
   the same ids. With your own IDs you can read `data/` directly on the host, without the tools container. Changing
-  it later is not supported: nzbd never re-owns existing key volumes (fresh start, section 6 "the key volumes are not
+  it later is not supported: nzbd never re-owns existing key folders (fresh start, section 6 "the key directories are not
   owned by").
 - `docker compose exec nzbd /nzbd <cmd>` runs the CLI inside the running container as the container user. The binary is
   `/nzbd`; it is not on `PATH` (the image has no shell). Never add `-u 0`: files it creates would not be readable
@@ -24,8 +26,8 @@ against the production image unless marked otherwise. Conventions:
 - If the container is not running (crash loop), use `docker compose run --rm --no-deps nzbd <cmd>` instead (same
   mounts, same user).
 - "Tools container" below means `docker run --rm -u <NZBD_UID>:<NZBD_GID> ... --entrypoint sh caddy:2` (any small image with
-  `sh`, `cat`, `tar` works). It is how you touch files in `data/` and in volumes without a shell in the app image.
-- `data/` is `deploy/data` unless you set `NZBD_DATA_DIR`. It is owned by the container user with mode 0700 (the
+  `sh`, `cat`, `tar` works). It is how you touch files in `data/` and in the volumes directory without a shell in the app image.
+- `data/` is `deploy/storage/data` unless you set `NZBD_DATA_DIR`. It is owned by the container user with mode 0700 (the
   installer; 0750 is fine too).
 
 ## 1. Checklists
@@ -62,13 +64,13 @@ plus the keys kept apart.
 | Item | Where | How | Contains |
 |---|---|---|---|
 | Database, **SQLite** | `data/nzbd.sqlite` (+ `-wal`, `-shm`) | the in-process scheduler or **`nzbd backup`**: a consistent `VACUUM INTO` copy, stripped of sessions, staged credentials, open invitations, recovery codes and throttle rows (`secure_delete`, then `VACUUM`), marked restore-pending, `integrity_check`ed, then encrypted if a backup key is set; mode 0600, keeps 14 | releases, Argon2 password hashes, **sealed** TOTP secrets, API-key hashes, emails, audit log |
-| Database, **PostgreSQL** | volume `nzbd_pg_data` | the in-process scheduler or **`nzbd backup`**: the nzbd snapshot export (one `REPEATABLE READ` snapshot, binary `COPY` per table, manifest with row counts and SHA-256 per table and the audit anchors; no `pg_dump` needed), without sessions, staged credentials, open invitations, recovery codes, throttle rows and the search tables; encrypted if a backup key is set; mode 0600, keeps 14 | the same as SQLite; never the database role passwords |
+| Database, **PostgreSQL** | folder `$VOLS/pg_data` (root needed to read it) | the in-process scheduler or **`nzbd backup`**: the nzbd snapshot export (one `REPEATABLE READ` snapshot, binary `COPY` per table, manifest with row counts and SHA-256 per table and the audit anchors; no `pg_dump` needed), without sessions, staged credentials, open invitations, recovery codes, throttle rows and the search tables; encrypted if a backup key is set; mode 0600, keeps 14 | the same as SQLite; never the database role passwords |
 | NZB library | `data/store/` | file copy (rsync/tar). Files are immutable and named by SHA-256, so incremental copies are cheap | the user's NZBs |
-| **TOTP encryption key** | volume `nzbd_secrets`, file `nzbd_totp_key` | **separately from everything above**, offline | 32 random bytes (base64) |
+| **TOTP encryption key** | folder `$VOLS/secrets`, file `nzbd_totp_key` | **separately from everything above**, offline | 32 random bytes (base64) |
 | Backup encryption key (recommended) | the file named by `maintenance.backup_encryption_key_file` | **separately from the backups**, offline; without it encrypted backups are unreadable | 32 random bytes (base64), a different key than the TOTP key |
-| PostgreSQL role passwords | volumes `nzbd_secrets` (`nzbd_db_password`), `nzbd_setup_secrets`, `nzbd_pg_secrets` | not needed in the backup: a restore goes into a fresh cluster that is initialized from the password files `dbsecrets` already wrote (it keeps an existing set); keep the volumes, or run `dbsecrets` on a new host to generate a new set | random |
+| PostgreSQL role passwords | folders `$VOLS/secrets` (`nzbd_db_password`), `$VOLS/setup_secrets`, `$VOLS/pg_secrets` | not needed in the backup: a restore goes into a fresh cluster that is initialized from the password files `dbsecrets` already wrote (it keeps an existing set); keep the folders, or run `dbsecrets` on a new host to generate a new set | random |
 | Proxy credentials | `deploy/.env` | password manager | bcrypt hash and user name |
-| Proxy CA | volume `nzbd_caddy` | optional; if lost, Caddy makes a new CA and every device must trust the new root | CA private key: treat as secret |
+| Proxy CA | folder `$VOLS/caddy` | optional; if lost, Caddy makes a new CA and every device must trust the new root | CA private key: treat as secret |
 
 `failed/`, `duplicates/`, `tmp/` and the search index `index/` do not need backups (`failed/` holds files that were
 never indexed, copy it if you care about them; the index is rebuilt from the database after a restore). Backup files
@@ -116,7 +118,7 @@ encrypted file `nzbd-YYYYMMDDTHHMMSSZ.sqlite.enc` / `.nzbdpg.enc` (XChaCha20-Pol
 every install: backups hold password hashes, sealed TOTP secrets and emails. Setup, once:
 
 ```
-# the one-shot keygen service has the secrets volume writable; the command is replaced by the arguments
+# the one-shot keygen service has the secrets folder writable; the command is replaced by the arguments
 docker compose --profile setup run --rm keygen keygen --out /run/secrets/nzbd_backup_key
 # then in config/nzbd.toml, under [maintenance]:
 #   backup_encryption_key_file = "/run/secrets/nzbd_backup_key"
@@ -195,12 +197,15 @@ docker run --rm -u "$IDS" -v "$PWD/data/store:/s:ro" --entrypoint tar caddy:2 -C
 Back up the key once, right after `keygen`, and again after every rotation:
 
 ```
-docker run --rm -u "$IDS" -v nzbd_secrets:/s:ro --entrypoint cat caddy:2 /s/nzbd_totp_key > totp_key.backup
+docker run --rm -u "$IDS" -v "$VOLS/secrets":/s:ro --entrypoint cat caddy:2 /s/nzbd_totp_key > totp_key.backup
 chmod 0400 totp_key.backup      # keep it in a password manager or on an offline medium, NOT next to the DB backups
 ```
 
-Warning: `docker compose down -v` and `docker volume rm nzbd_secrets` delete the key. `docker compose down`
-(without `-v`) is safe.
+The key folder is a plain host folder: `docker compose down -v` and `docker volume prune` leave it alone; only
+deleting `$VOLS/secrets` yourself removes the key. To back up the whole volumes directory, archive it as root (the
+`pg_data` and `caddy` folders belong to other users and are mode 0700) and keep the archive apart from the database
+backups: `sudo tar -C "$VOLS" -czf nzbd-volumes-$(date +%F).tar.gz --exclude=./pg_data .` (leave `pg_data` out: a raw copy
+of a running cluster is not a backup; the snapshot export of `nzbd backup` is).
 
 ### Restore the database from a backup
 
@@ -232,12 +237,13 @@ A restore loads the snapshot export into a **fresh, empty** database at the same
 in the one-shot `setup` service. It never overwrites a live database.
 
 1. Stop the app: `docker compose stop nzbd`
-2. Replace the database volume (keep the old one until the restore is verified, by renaming it through a copy or by
-   restoring into a new install directory; Docker cannot rename volumes):
+2. Replace the database folder (keep the old one until the restore is verified: move it aside, e.g.
+   `sudo mv "$VOLS/pg_data" "$VOLS/pg_data.old"`):
 
    ```
    docker compose stop postgres && docker compose rm -f postgres
-   docker volume rm nzbd_pg_data                      # only once you have a verified backup and, ideally, an off-host copy
+   sudo mv "$VOLS/pg_data" "$VOLS/pg_data.old" && mkdir "$VOLS/pg_data"   # only with a verified backup and, ideally, an off-host copy
+   docker compose --profile setup run --rm volperms   # hands the new empty folder to uid 999
    docker compose up -d postgres                      # a new cluster; roles from the existing password files
    docker compose --profile setup run --rm setup      # the schema (db migrate --yes)
    docker compose --profile setup run --rm setup db restore /data/backups/nzbd-YYYYMMDDTHHMMSSZ.nzbdpg.enc
@@ -302,7 +308,7 @@ your offline copy (below), or install a new key and run `user reset-mfa` (sectio
 
 Not every rollback goes through an nzbd backup: a volume or NAS snapshot, a copy of `nzbd.sqlite` put back by hand, a
 PostgreSQL point-in-time or `pg_basebackup` restore, an operator `pg_dump` load. `serve` keeps the restore anchor
-`paths.state/db-anchor.json` (0600; on its own volume `nzbd_state`): the library identity (backend, instance id,
+`paths.state/db-anchor.json` (0600; in its own folder `$VOLS/state`): the library identity (backend, instance id,
 PostgreSQL `system_identifier`), the high-water marks of the audit, release and outbox sequences and the two audit class
 heads. It is rewritten every 10 s while something changed and at shutdown. At startup (and before every CLI command but
 `db check`, `search status`, `audit verify`, `backup` and `restore-finish`) a database **behind** the anchor is refused
@@ -311,9 +317,9 @@ anchor names a library with `BACKEND_MISMATCH`. If the rollback was on purpose, 
 it applies the same effects as after a backup restore and re-anchors.
 
 **Residuals (honest):** (1) a rollback of the database **and** `paths.state` together is not detected: with SQLite that
-is a snapshot of both the data directory and the `nzbd_state` volume (which is why the state is on its own
-volume; health warns `ANCHOR_SAME_FILESYSTEM` if you moved it next to the database); with PostgreSQL a joint rollback
-of `nzbd_pg_data` and `nzbd_state`. (2) Changes of the last ~10 s before the snapshot point. (3) PostgreSQL: a
+is a snapshot of both the data directory and the `state` folder (which is why the state is on its own
+folder; health warns `ANCHOR_SAME_FILESYSTEM` if you moved it next to the database); with PostgreSQL a joint rollback
+of `pg_data` and `state`. (2) Changes of the last ~10 s before the snapshot point. (3) PostgreSQL: a
 point-in-time restore to fewer than ~32 audit rows before the anchor, with a retention purge in between. The external
 control for all three is the `audit chain anchor` line you keep off-host (section 9).
 
@@ -337,14 +343,13 @@ nothing is indexed, but the blob that was already stored stays as an orphan unti
 
 ```
 docker compose stop nzbd
-docker run --rm -i -u "$IDS" -v nzbd_secrets:/s --entrypoint sh caddy:2 \
+docker run --rm -i -u "$IDS" -v "$VOLS/secrets":/s --entrypoint sh caddy:2 \
   -c 'umask 077 && cat > /s/nzbd_totp_key && chmod 0400 /s/nzbd_totp_key' < totp_key.backup
 docker compose up -d
 ```
 
 (If a key file already exists, move it aside first, section 3.) The file must be owned by the container user (`$IDS`) and mode 0400 or
-the app refuses to start (SEC-042). On a brand-new host run `docker compose --profile setup run --rm keygen` first to
-create the volume, then replace the file as shown. The backup encryption key is restored the same way (file
+the app refuses to start (SEC-042). On a brand-new host run the installer (or `volperms`) first to create and hand over the folder, then replace the file as shown. The backup encryption key is restored the same way (file
 `nzbd_backup_key`).
 
 ### PostgreSQL maintenance
@@ -364,11 +369,11 @@ create the volume, then replace the file as shown. The backup encryption key is 
 - **Role passwords**: generated once by `dbsecrets` and read by the server only when the cluster is created. To rotate
   one: in `docker compose exec postgres psql -p 5432 -U postgres -d nzbd` run `\password nzbd_app` (psql asks twice
   without echo and sends only the SCRAM verifier: no plaintext in the server log or in `~/.psql_history`, which would
-  live on the `pg_data` volume; never type `ALTER ROLE ... PASSWORD '...'` interactively), then write the same value to
-  the 0400 file in its volume with a tools container (`umask 077 && cat > /s/nzbd_db_password` from stdin, as for the
+  live in the `pg_data` folder; never type `ALTER ROLE ... PASSWORD '...'` interactively), then write the same value to
+  the 0400 file in its folder with a tools container (`umask 077 && cat > /s/nzbd_db_password` from stdin, as for the
   TOTP key), then restart nzbd. Rarely needed: nothing outside the socket can use them.
 - **Major version upgrades** (e.g. 18 -> 19 when a release pins it): take an `nzbd backup`, create the new cluster in a
-  new `nzbd_pg_data` volume and restore into it ("Restore (PostgreSQL)"); the snapshot export is portable across major
+  new `pg_data` folder and restore into it ("Restore (PostgreSQL)"); the snapshot export is portable across major
   versions. `pg_upgrade` is not supported by the shipped setup.
 - **Physical backups** (`pg_basebackup`, PITR) are an expert option for very large installs: they contain the role
   password verifiers (`pg_authid`), must be encrypted by you, and a physical restore is detected as `RESTORE_DETECTED`
@@ -387,19 +392,19 @@ first (a running server holds the old key in memory).
 
 ```
 docker compose stop nzbd
-# 1. new key next to the old one (keygen refuses to overwrite; the secrets volume is the usual place)
+# 1. new key next to the old one (keygen refuses to overwrite; the secrets folder is the usual place)
 docker compose --profile setup run --rm keygen keygen --out /run/secrets/nzbd_totp_key.new
 # 2. rehearsal: checks that every secret opens under the current key, changes nothing
 docker compose run --rm --no-deps nzbd keys rotate-totp --new-key-file /run/secrets/nzbd_totp_key.new --dry-run
 # 3. the real run: takes a database backup first (encrypted if configured), then one transaction
 docker compose run --rm --no-deps nzbd keys rotate-totp --new-key-file /run/secrets/nzbd_totp_key.new
 # 4. swap the key files (keep the old one until a login worked), then start
-docker run --rm -u "$IDS" -v nzbd_secrets:/s --entrypoint sh caddy:2 \
+docker run --rm -u "$IDS" -v "$VOLS/secrets":/s --entrypoint sh caddy:2 \
   -c 'cd /s && mv nzbd_totp_key nzbd_totp_key.old-$(date +%F) && mv nzbd_totp_key.new nzbd_totp_key'
 docker compose up -d
 ```
 
-(The `nzbd` service sees the secrets volume read-only at `/run/secrets`, which is all `rotate-totp` needs; only the
+(The `nzbd` service sees the secrets folder read-only at `/run/secrets`, which is all `rotate-totp` needs; only the
 one-shot `keygen` service and the `docker run` of step 4 write to it.)
 
 Crash safety: the old key file is never modified and the database changes in a single transaction, so an interrupted
@@ -416,7 +421,7 @@ enrolled again. Do it only if the key is really gone, or was exposed and you als
 
 ```
 docker compose stop nzbd
-docker run --rm -u "$IDS" -v nzbd_secrets:/s --entrypoint sh caddy:2 \
+docker run --rm -u "$IDS" -v "$VOLS/secrets":/s --entrypoint sh caddy:2 \
   -c 'mv /s/nzbd_totp_key /s/nzbd_totp_key.old-$(date +%F)'      # keep the old one until you have verified the new setup
 docker compose --profile setup run --rm keygen                    # refuses to overwrite; makes the new key
 docker compose up -d
@@ -833,10 +838,11 @@ A backup you never restored is a hope, not a backup. Practise this drill; it nev
 | `setup` says `APP_SESSIONS_ACTIVE` | nzbd (or another app-role client) is connected; a migration or restore under a live server is refused. | `docker compose stop nzbd` and run it again. |
 | nzbd log: `RESTORE_PENDING` | A restored backup (every nzbd backup carries the mark) has not been finished. | Section 2, "Check and finish" step 3 (`db restore-finish --yes`). |
 | nzbd log: `RESTORE_DETECTED` / `LIBRARY_MISMATCH` / `BACKEND_MISMATCH` | The database is behind the restore anchor in `paths.state`, is another library, or is empty while the anchor names one: a rollback or restore nzbd did not perform, a changed `paths.db`, or a switched `NZBD_DB_BACKEND`. | If the rollback was intended: `db restore-finish --yes` (section 2). Otherwise find out what replaced the database before anything else; never switch `NZBD_DB_BACKEND` of an existing library. |
-| nzbd log: `OWNER_SECRET_VISIBLE` | The PostgreSQL owner password is readable by `serve` (someone mounted `nzbd_setup_secrets` into `nzbd`). | Remove that mount; only the `setup` service may have it. |
+| nzbd log: `OWNER_SECRET_VISIBLE` | The PostgreSQL owner password is readable by `serve` (someone mounted the `setup_secrets` folder into `nzbd`). | Remove that mount; only the `setup` service may have it. |
 | nzbd log: `DB_ENV_AMBIGUOUS` | A libpq `PG*` or `SSL_CERT_*` variable is set for `nzbd` (PostgreSQL backend). | Remove it from the environment / compose override; nzbd takes every database setting from its config. |
-| install.sh: "the key volumes are not owned by UID:GID" (volperms: "holds files of another user") | The key volumes come from an earlier install that ran as another `NZBD_UID:NZBD_GID`. nzbd never re-owns or deletes them (fresh starts only, owner decision 2026-10-16). | Put the old UID:GID back into `.env` and re-run, or start fresh: back up what you still need (section 2: key, backups), then `docker compose --profile setup down -v` (deletes the TOTP key, the state and, with PostgreSQL, the database volumes; the data directory stays) and re-run `./install.sh`. |
-| `keygen` or `serve`: permission denied on `/run/secrets` or `/state` | The volumes were created without the `volperms` step for a custom `NZBD_UID` (Docker hands an empty volume to the image's uid 10001). | `docker compose --profile setup run --rm volperms`, then repeat the step (`./install.sh` does it in order). |
+| install.sh: "the key directories are not owned by UID:GID" (volperms: "holds files of another user") | The folders under the volumes directory come from an earlier install that ran as another `NZBD_UID:NZBD_GID`. nzbd never re-owns or deletes them (fresh starts only, owner decision 2026-10-16). | Put the old UID:GID back into `.env` and re-run, or start fresh: back up what you still need (section 2: key, backups), remove the old stack and the volumes directory yourself (deletes the TOTP key, the state and, with PostgreSQL, the database files; the data directory stays) and re-run `./install.sh`. |
+| install.sh: "old Docker volumes found" | The install predates the volumes directory and keeps its keys in Docker volumes (`nzbd_nzbd_secrets` or `nzbd_secrets`, ...). Deploying now would create an empty key folder, a NEW TOTP key, and lock everyone out. | Stop the old stack, copy each old volume once into its folder with the command install.sh prints (also in [CHANGELOG.md](CHANGELOG.md) 0.5.0), re-run. The old volumes stay as a backup. |
+| `keygen` or `serve`: permission denied on `/run/secrets` or `/state` | The folders were not handed over with the `volperms` step for a custom `NZBD_UID` (a freshly created folder belongs to the account that created it). | `docker compose --profile setup run --rm volperms`, then repeat the step (`./install.sh` does it in order). |
 | nzbd log: `DB_FILE_MODE` (SQLite) | The database file is not owned by the container user (`$IDS`), is a symlink, or its directory is writable by group/other. | `chown -h "$IDS"` the file (as root in a tools container: `docker run --rm -u 0 -v "$PWD/data:/d" --entrypoint chown caddy:2 -h "$IDS" /d/nzbd.sqlite`), `chmod 0750` the directory (section 2). |
 | `postgres` unhealthy / restarting | First start without the password files (`dbsecrets` not run), a full disk, or a hand-edited `postgresql.conf`. | `docker compose logs postgres`; run `docker compose --profile setup run --rm dbsecrets`; check `docker system df -v`. |
 | `nzbd` container `unhealthy` / restarting | Startup validation failed. `docker compose logs nzbd` and `docker compose run --rm --no-deps nzbd config check` print the reason: a missing directory under `data/`, wrong ownership (not the container user, `NZBD_UID:NZBD_GID`), key file missing or not 0400 / not owned by the container user (`$IDS`), overlapping paths, bad config key. | Fix the named item (INSTALL steps 3-4); `docker compose up -d`. |

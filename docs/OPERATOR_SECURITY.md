@@ -10,9 +10,9 @@ What protects your instance and what you must keep safe.
   [Existing reverse proxy](#existing-reverse-proxy).
 - **TLS** comes from Caddy's internal CA; HSTS is sent. Cookies are `__Host-`, `Secure`, `HttpOnly`, `SameSite=Strict`.
   Browsers must send `Sec-Fetch-Site` (all current browsers; Safari 16.4+).
-- **Secrets.** The TOTP key exists only in the `nzbd_secrets` volume: not in `data/`, not in `nzbd backup`
+- **Secrets.** The TOTP key exists only in the `secrets` folder of the volumes directory (`NZBD_VOLUMES_DIR`, a plain host folder, mode 0700, owned by the container user): not in `data/`, not in `nzbd backup`
   output, not in git. With PostgreSQL the role passwords are generated files too (never shown, never in the config,
-  the environment or a log): the app role's next to the TOTP key, the owner role's only in `nzbd_setup_secrets`,
+  the environment or a log): the app role's next to the TOTP key, the owner role's only in the `setup_secrets` folder,
   which only the one-shot `setup` service mounts (`serve` refuses to start if it can read it). Passwords, API keys and session ids are stored only as hashes (the TOTP secret is encrypted).
   `deploy/.env` holds the proxy hash: keep it mode 0600; it is git-ignored. `deploy/config/nzbd.toml` holds no secret
   but is a control surface at the same trust level (`server.insecure_cookies`, `metrics.listen`, paths): keep `deploy/`
@@ -26,8 +26,9 @@ What protects your instance and what you must keep safe.
   other container or login uses: media containers (SABnzbd, Sonarr, Radarr ...) commonly run as `PUID=1000
   PGID=1000`, and sharing those ids hands them nzbd's database. nzbd makes itself non-dumpable at start (review 44
   M1), so that account cannot read the TOTP key, the database passwords, the environment or the memory of a running
-  nzbd through `/proc/<pid>/root`, `/proc/<pid>/environ` or `/proc/<pid>/mem` (deploy-check proves it); the key volume
-  itself lives under `/var/lib/docker` (root only). Members of the `docker` group are root-equivalent anyway.
+  nzbd through `/proc/<pid>/root`, `/proc/<pid>/environ` or `/proc/<pid>/mem` (deploy-check proves it); the key folder
+  itself is a host folder owned by that same account, so **the account (and root) can read the key directly**: another
+  reason for a dedicated account, and for the image's own `10001:10001`, which no host account has. Members of the `docker` group are root-equivalent anyway.
   Optionally mount the host's `/proc` with `hidepid=2`. The image's own `10001:10001` (proposed when the installer
   runs as root or with rootless Docker / userns-remap) belongs to no host account, so only root touches the data.
 - **What is logged.** One JSON line per event on stdout (`docker compose logs nzbd`), no cookies, API keys, passwords,
@@ -42,10 +43,10 @@ What protects your instance and what you must keep safe.
   clear in the database (`account.email`) and therefore in every backup, visible to administrators and in `nzbd user list`,
   never logged, cleared when an account is deleted (older backups keep it until they are rotated away). nzbd never sends
   anything to it. Clearing is a plain `UPDATE`, so a deleted account's old address can also survive in free pages and
-  in the WAL until they are reused or checkpointed: a raw copy of `nzbd.sqlite`/`-wal` (or of the PostgreSQL volume)
+  in the WAL until they are reused or checkpointed: a raw copy of `nzbd.sqlite`/`-wal` (or of the PostgreSQL `pg_data` folder)
   may still contain it (an `nzbd backup` is rewritten and vacuumed, so it drops free pages; restoring an older backup
   brings the address back). Treat raw database copies like backups.
-- **Invitation path.** `security.invite_path` moves the anonymous invitation page away from `/invite` (the
+- **Invitation path (T135).** `security.invite_path` moves the anonymous invitation page away from `/invite` (the
   installer writes a random `/join-...` path on a fresh install). That is obscurity only: it keeps automated scanners
   and casual probing off the page, nothing more. The path is not a secret (it is in the settings file, `config check`
   output and the admin result pages, and may appear in access logs like any path); the single-use, 160-bit invitation
@@ -60,7 +61,7 @@ What protects your instance and what you must keep safe.
   `account_throttled`). On Docker Desktop, or behind a proxy whose address is not in `server.trusted_proxies`, all
   clients share one address, so the lock and the per-IP budget become shared too: a LAN neighbour who passes the proxy
   login can lock the owner out from that address (documented limitation).
-- **Residual risks:** proxy
+- **Residual risks** of 3.0 (project security review, section 39.8; also the CHANGELOG): proxy
   password strength is the outer control, the per-IP throttles are shared behind Docker Desktop, with SQLite a
   compromised nzbd process can rewrite the audit history ([Choosing a backend](#choosing-a-backend)), the audit chain is
   unkeyed (keep the anchor lines off-host), plaintext backups are neither confidential nor authenticated.
@@ -75,7 +76,7 @@ same tamper-evident audit chain and the same restore controls; what differs is *
 | A bug or a careless tool | Triggers and CHECKs refuse: audit rows cannot be edited or purged before the retention floors (90 / 365 days), accounts are never deleted, the last admin stays. | The same rules, plus grants. |
 | **A compromised nzbd process** (code execution as its container user, `NZBD_UID`) | **No protection inside the database.** SQLite has no users: whoever can write the file can drop the triggers, **rewrite or delete audit history** (and recompute the unkeyed chain so `audit verify` still says OK), purge before the floors, change `retention_policy`, delete accounts. | `serve` holds only the app role: it **cannot** run DDL, update or delete audit rows, delete account rows or lower the retention floors; those need the owner role, which only the one-shot `setup` service has (review 30 M4), or the superuser, reachable by peer authentication only from processes running as uid 999 with the socket volume mounted (the `postgres` container as shipped). It **can** still change account contents (roles within the last-admin rule, password hashes, TOTP secrets, disabled state: the app role needs `UPDATE` on accounts), i.e. take over accounts; those changes are themselves recorded in the audit history it cannot rewrite. |
 | Database network surface | None (a file). | None: the server has no network at all (socket only, mounted read-only into nzbd); superuser by peer only; scram for the two roles. |
-| Restore detection | Every nzbd backup is restore-pending; the anchor in `paths.state` refuses a file rolled back by hand (`RESTORE_DETECTED`). **Residual:** a snapshot that rolls back the data directory **and** the `nzbd_state` volume together is not detected (that is why the state has its own volume; health warns `ANCHOR_SAME_FILESYSTEM` if you put it next to the database). | The same, with the cluster identity in the anchor. Residual: a joint rollback of `nzbd_pg_data` **and** `nzbd_state`, the last ~10 s, a point-in-time restore to just before the anchor across a purge. |
+| Restore detection | Every nzbd backup is restore-pending; the anchor in `paths.state` refuses a file rolled back by hand (`RESTORE_DETECTED`). **Residual:** a snapshot that rolls back the data directory **and** the `state` folder together is not detected (that is why the state has its own volume; health warns `ANCHOR_SAME_FILESYSTEM` if you put it next to the database). | The same, with the cluster identity in the anchor. Residual: a joint rollback of `pg_data` **and** `state`, the last ~10 s, a point-in-time restore to just before the anchor across a purge. |
 | What you operate | One container. | Two more containers (one long-running), a second volume to watch for disk, PostgreSQL major upgrades by export/restore (RUNBOOK). |
 
 **Recommendation.** For a personal library on your LAN, SQLite is fine: an attacker who can execute code in nzbd
@@ -92,7 +93,7 @@ you ever move by hand, the old `nzbd.sqlite` still holds password hashes, sealed
 deletes it, so put it into an encrypted backup or delete it yourself.
 
 **PostgreSQL rules that keep the guarantees** (all shipped and asserted by the project's deployment check): never mount the
-owner secret (`nzbd_setup_secrets`) or the socket volume into anything else, never give `postgres` a network or a
+owner secret (the `setup_secrets` folder) or the socket volume into anything else, never give `postgres` a network or a
 published port, never set `PG*`/`SSL_CERT_*` variables for nzbd (it refuses them), never edit roles, grants or the
 security block of `deploy/postgres/postgresql.conf` (the logging settings keep failing rows, password hashes and keys
 out of the server log).
