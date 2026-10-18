@@ -327,6 +327,17 @@ async fn post_invite(
     match redeemed {
         // Both purposes continue on the enrollment page; which one it is stays server-side.
         Ok(Redeemed::Account { .. } | Redeemed::Recovery { .. }) => {
+            // Fixation (same rule as `/login`): a session cookie presented with the form is
+            // revoked, never left alive next to the new one. Its row is anonymous to the new
+            // account, so a failure here is logged and does not fail the redemption.
+            if let Some(old) = auth.presented_id(&headers)
+                && let Err(e) = auth
+                    .db()
+                    .delete_session(&crypto::sha256(old.as_bytes()))
+                    .await
+            {
+                tracing::error!(error = %e, "previous session revoke failed");
+            }
             let mut resp = see_other("/mfa/enroll", Some(cookie));
             resp.headers_mut()
                 .append(header::SET_COOKIE, auth.clear_login_nonce_cookie());

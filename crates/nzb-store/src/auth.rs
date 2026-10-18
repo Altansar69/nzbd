@@ -326,7 +326,7 @@ impl SqliteDb {
         max_per_stage: u32,
         strict: bool,
     ) -> Result<(), StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let removed = sqlx::query("DELETE FROM session WHERE id_hash = ?1")
             .bind(old_hash.as_slice())
             .execute(&mut *tx)
@@ -470,7 +470,7 @@ impl SqliteDb {
         user_id: i64,
         now: i64,
     ) -> Result<Option<i64>, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let r = bump_failure(&mut tx, user_id, now).await?;
         tx.commit().await?;
         Ok(r)
@@ -498,7 +498,7 @@ impl SqliteDb {
         ip: Option<&str>,
         now: i64,
     ) -> Result<bool, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let row = match user_id {
             Some(id) => {
                 sqlx::query(

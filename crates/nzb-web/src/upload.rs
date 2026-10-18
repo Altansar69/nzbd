@@ -99,6 +99,9 @@ pub struct UploadDeps {
     pub storage: Option<Arc<StorageGuard>>,
     /// Audit sink for `nzb_upload*` rows (T138); `None` writes none (stand-alone tests).
     pub audit: Option<(Store, Arc<dyn WallClock>)>,
+    /// Categories the instance hides (`ui.show_xxx = false`): refused as an API hint, like a
+    /// typo. A release stored there could be neither seen nor deleted from the UI.
+    pub hidden_categories: Arc<[u16]>,
 }
 
 impl UploadDeps {
@@ -128,6 +131,7 @@ impl UploadDeps {
             slots: Arc::new(Semaphore::new(DEFAULT_UPLOAD_CONCURRENCY)),
             storage: None,
             audit: None,
+            hidden_categories: Arc::from(Vec::new()),
         }
     }
 
@@ -537,15 +541,18 @@ fn clean_name(raw: &str) -> Option<String> {
 }
 
 /// Resolves a category hint through the taxonomy (empty / blank = no hint). The pipeline
-/// resolves again; doing it here refuses an unknown value before any byte is staged.
-fn resolve_hint(tax: &Taxonomy, raw: &str) -> Result<Option<String>, Rejected> {
+/// resolves again; doing it here refuses an unknown value before any byte is staged. A category
+/// hidden from the caller is as unknown as a typo (same rule as changing a release's category).
+fn resolve_hint(tax: &Taxonomy, hidden: &[u16], raw: &str) -> Result<Option<String>, Rejected> {
     let t = raw.trim();
     if t.is_empty() {
         return Ok(None);
     }
-    tax.resolve(t)
-        .map(|id| Some(id.to_string()))
-        .ok_or(INVALID_CATEGORY)
+    let id = tax.resolve(t).ok_or(INVALID_CATEGORY)?;
+    if hidden.contains(&id) {
+        return Err(INVALID_CATEGORY);
+    }
+    Ok(Some(id.to_string()))
 }
 
 /// Validates and sanitizes a free-text source label (`source` form part, `X-Source` header).
@@ -598,6 +605,8 @@ enum Mode {
         /// Per-IP upload bucket; the rate-limit layer already spent the request's first token,
         /// so file 1 is covered and each further file spends one more (T083).
         ip: Option<IpUploadBucket>,
+        /// Categories hidden from this caller (instance rule plus preference).
+        hidden: Arc<[u16]>,
     },
 }
 
@@ -747,6 +756,7 @@ async fn read_parts(
     deadline: Instant,
     items: &mut Vec<Item>,
 ) -> Result<(), Rejected> {
+    let mut hidden: Arc<[u16]> = Arc::clone(&deps.hidden_categories);
     let (api, mut hint, mut label, mut csrf_pending, mut charges, ui_user, audit_user, audit_ip) =
         match mode {
             Mode::Api {
@@ -762,20 +772,24 @@ async fn read_parts(
                 user_id,
                 client,
                 ip,
-            } => (
-                None,
-                None,
-                None,
-                expect_csrf,
-                Some(Charges {
-                    session,
-                    ip,
-                    ip_first_free: true,
-                }),
-                Some(user_id),
-                Some(user_id),
-                client,
-            ),
+                hidden: h,
+            } => {
+                hidden = h;
+                (
+                    None,
+                    None,
+                    None,
+                    expect_csrf,
+                    Some(Charges {
+                        session,
+                        ip,
+                        ip_first_free: true,
+                    }),
+                    Some(user_id),
+                    Some(user_id),
+                    client,
+                )
+            }
         };
     let ui = api.is_none();
     let source = if ui {
@@ -832,7 +846,7 @@ async fn read_parts(
                 }
                 let text = read_small(&mut field, meter).await?;
                 // A form field overrides nothing: an `X-Category` header is the API alternative.
-                hint = resolve_hint(&deps.taxonomy, &text)?;
+                hint = resolve_hint(&deps.taxonomy, &hidden, &text)?;
             }
             "source" => {
                 // Like `category`: must precede the files; applies to every file of the request.
@@ -1010,7 +1024,7 @@ async fn api_inner(
     let hint = match req.headers().get("x-category") {
         None => None,
         Some(v) => match v.to_str() {
-            Ok(t) => resolve_hint(&deps.taxonomy, t).map_err(reject)?,
+            Ok(t) => resolve_hint(&deps.taxonomy, &deps.hidden_categories, t).map_err(reject)?,
             Err(_) => return Err(reject(INVALID_CATEGORY)),
         },
     };
@@ -1247,6 +1261,7 @@ async fn ui_post(
         user_id: sess.user_id,
         client: client_ip,
         ip,
+        hidden: Arc::clone(&sess.hidden_categories),
     };
     let items = match read_multipart(&deps, mp, &meter, mode, deadline).await {
         Ok(i) => i,
@@ -1262,5 +1277,22 @@ async fn ui_post(
             tracing::error!(error = %e, "upload result render failed");
             INTERNAL.response()
         }
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::resolve_hint;
+    use nzb_core::{Taxonomy, XXX_CATEGORY};
+
+    #[test]
+    fn a_hidden_category_is_refused_as_a_hint_like_an_unknown_one() {
+        let tax = Taxonomy::builtin().unwrap_or_else(|e| panic!("{e}"));
+        let hidden = tax.subtree_ids(XXX_CATEGORY);
+        assert!(resolve_hint(&tax, &[], "6000").is_ok_and(|h| h.as_deref() == Some("6000")));
+        assert!(resolve_hint(&tax, &hidden, "6000").is_err());
+        assert!(resolve_hint(&tax, &hidden, "6010").is_err());
+        assert!(resolve_hint(&tax, &hidden, "nope").is_err());
+        assert!(resolve_hint(&tax, &hidden, "  ").is_ok_and(|h| h.is_none()));
     }
 }

@@ -472,7 +472,7 @@ impl SqliteDb {
         now: i64,
         actor: Actor<'_>,
     ) -> Result<bool, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let res =
             sqlx::query("UPDATE api_key SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL")
                 .bind(now)

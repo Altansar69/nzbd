@@ -1134,6 +1134,11 @@ impl Pipeline {
     ) -> IngestError {
         let panics = meta.path.as_ref().map_or(MAX_PANICS, |p| {
             self.attempts_mut(|m| {
+                // A flood of panicking paths cannot be tracked individually (the table would be
+                // reset); a path that would overflow it is quarantined on its first panic.
+                if m.len() >= MAX_TRACKED_PATHS && !m.contains_key(p) {
+                    return MAX_PANICS;
+                }
                 let a = m.entry(p.clone()).or_default();
                 a.panics = a.panics.saturating_add(1);
                 a.panics

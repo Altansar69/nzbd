@@ -461,6 +461,17 @@ impl<S: IndexSource> Indexer<S> {
             Ok(()) => {}
             #[cfg(test)]
             Err(SearchError::Injected) => return Err(SearchError::Injected),
+            Err(err @ SearchError::Store(_)) => {
+                // The document source failed (database down, statement timeout), not the writer:
+                // bisecting the batch would only hammer the database and a few of these rounds would
+                // degrade the index for nothing. Drop the uncommitted work and leave the outbox rows
+                // for the next round (idempotent).
+                let e = Arc::clone(engine);
+                if blocking(move || e.reopen_writer()).await.is_err() {
+                    self.writer_failed(engine).await;
+                }
+                return Err(err);
+            }
             Err(err) => {
                 // The writer lost the round's uncommitted work. Before blaming the writer, look for a
                 // document that breaks it (review 32 L4).

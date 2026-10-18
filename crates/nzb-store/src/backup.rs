@@ -188,6 +188,23 @@ async fn backup_pool(
     })
 }
 
+/// Advisory lock on the backup directory inode, held by every backup of this destination (server
+/// maintenance task or `nzbd backup`): one must not remove the in-flight temporary snapshot of the
+/// other, and two of the same second must not race past the "never overwritten" check. No lock
+/// file is created, so there is no stale-file or lock-inode replacement race.
+pub(crate) fn lock_backup_dir(dir: &Path) -> Result<File, StoreError> {
+    let file = File::open(dir)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "another backup is using this directory",
+        )
+        .into()),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 async fn snapshot_and_publish(
     pool: &SqlitePool,
     tmp: &Path,
@@ -375,6 +392,7 @@ pub async fn backup_file_with(
         )
         .await?;
     let r = async {
+        let _lock = lock_backup_dir(dir)?;
         clean_stale_tmp(dir)?;
         backup_pool(&pool, dir, now, keep, key).await
     }
@@ -408,6 +426,7 @@ impl SqliteDb {
         keep: usize,
         key: Option<&BackupKey>,
     ) -> Result<BackupReport, StoreError> {
+        let _lock = lock_backup_dir(dir)?;
         clean_stale_tmp(dir)?;
         backup_pool(self.readers(), dir, now, keep, key).await
     }

@@ -954,12 +954,15 @@ fn upload_deps(
     taxonomy: Arc<nzb_core::Taxonomy>,
     upload_timeout: Duration,
 ) -> nzb_web::upload::UploadDeps {
+    let hidden = hidden_categories(cfg, &taxonomy);
     let mut deps = nzb_web::upload::UploadDeps::new(
         handle,
         taxonomy,
         cfg.paths.tmp.clone(),
         cfg.limits.max_file_bytes,
     );
+    // The instance rule only (no account preference on the API): a hidden category is refused.
+    deps.hidden_categories = hidden;
     // The reply wait is bounded by what is left of the request budget (`upload_timeout`, minus a
     // margin to answer 504), per request and not per file (T051 L2).
     deps.request_budget = upload_timeout;

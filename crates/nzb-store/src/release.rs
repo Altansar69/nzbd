@@ -760,14 +760,17 @@ impl SqliteDb {
         row.as_ref().map(release_from_row).transpose()
     }
 
-    /// `ingested_at` of the newest release row (`None` for an empty database).
+    /// `ingested_at` of the newest release row (`None` for an empty database): the highest id, like
+    /// Postgres (same seam answer whatever the clock did; the GC consumer errs on the safe side).
     ///
     /// # Errors
     /// Database errors.
     pub async fn newest_ingested_at(&self) -> Result<Option<i64>, StoreError> {
-        Ok(sqlx::query_scalar("SELECT MAX(ingested_at) FROM release")
-            .fetch_one(self.readers())
-            .await?)
+        Ok(
+            sqlx::query_scalar("SELECT ingested_at FROM release ORDER BY id DESC LIMIT 1")
+                .fetch_optional(self.readers())
+                .await?,
+        )
     }
 
     /// SHA-256 of every release row: the referenced set for `FsStore::gc`. Read it as late as

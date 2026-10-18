@@ -305,6 +305,10 @@ impl PgDb {
         keep: usize,
         key: Option<&BackupKey>,
     ) -> Result<SnapshotReport, StoreError> {
+        // Same directory lock as the SQLite backup: a CLI backup must not remove the in-flight
+        // temporary snapshot of the server's maintenance task (or vice versa), and two exports of
+        // the same second cannot race past the `dest.exists()` check below.
+        let _lock = crate::backup::lock_backup_dir(dir)?;
         clean_stale_tmp(dir)?;
         let name = snapshot_name(now);
         let final_name = if key.is_some() {
@@ -320,7 +324,9 @@ impl PgDb {
         }
         let tmp = dir.join(format!(".{name}{TMP_SUFFIX}"));
         let enc_tmp = dir.join(format!(".{final_name}{TMP_SUFFIX}"));
-        let res = self.write_snapshot(&tmp, now).await;
+        // `create_new`: a temp file this call did not create is never removed below.
+        let file = open_new_0600(&tmp)?;
+        let res = self.write_snapshot(file, now).await;
         let tables = match res {
             Ok(t) => t,
             Err(e) => {
@@ -353,8 +359,8 @@ impl PgDb {
         })
     }
 
-    async fn write_snapshot(&self, tmp: &Path, now: i64) -> Result<Vec<(String, u64)>, StoreError> {
-        let mut out = BufWriter::new(open_new_0600(tmp)?);
+    async fn write_snapshot(&self, file: File, now: i64) -> Result<Vec<(String, u64)>, StoreError> {
+        let mut out = BufWriter::new(file);
         out.write_all(MAGIC)?;
         let mut tx = self.background().begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")

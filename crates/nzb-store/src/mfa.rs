@@ -202,7 +202,7 @@ impl SqliteDb {
         ip: Option<&str>,
         now: i64,
     ) -> Result<bool, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
             "SELECT username, totp_enabled, locked_until, enroll_token_hash, enroll_token_expires \
              FROM account WHERE id = ?1",
@@ -278,7 +278,7 @@ impl SqliteDb {
         sealed: &[u8],
         replace: bool,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         sqlx::query(
             "UPDATE account SET totp_secret_enc = ?2 \
              WHERE id = ?1 AND totp_enabled = 0 AND (totp_secret_enc IS NULL OR ?3 = 1)",
@@ -309,7 +309,7 @@ impl SqliteDb {
     /// # Errors
     /// Database failure.
     pub async fn second_factor_step(&self, a: FactorAttempt<'_>) -> Result<bool, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
             "SELECT username, totp_enabled, totp_last_step, locked_until FROM account \
              WHERE id = ?1 AND deleted_at IS NULL AND disabled_at IS NULL",
@@ -416,7 +416,7 @@ impl SqliteDb {
         ip: Option<&str>,
         now: i64,
     ) -> Result<bool, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
             "SELECT username, totp_enabled, totp_secret_enc, locked_until, enroll_token_hash, \
              enroll_token_expires FROM account WHERE id = ?1",
@@ -561,7 +561,7 @@ impl SqliteDb {
         ip: Option<&str>,
         now: i64,
     ) -> Result<(), StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let own = sqlx::query(
             "DELETE FROM session WHERE id_hash = ?1 AND account_id = ?2 AND stage = 'active'",
         )
@@ -652,7 +652,7 @@ impl SqliteDb {
         ip: Option<&str>,
         now: i64,
     ) -> Result<bool, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let n = sqlx::query("DELETE FROM session WHERE account_id = ?1 AND id_hash = ?2")
             .bind(user_id)
             .bind(id_hash.as_slice())
@@ -678,7 +678,7 @@ impl SqliteDb {
         ip: Option<&str>,
         now: i64,
     ) -> Result<u64, StoreError> {
-        let mut tx = self.writer().begin().await?;
+        let mut tx = self.begin_immediate().await?;
         let n = sqlx::query("DELETE FROM session WHERE account_id = ?1 AND id_hash <> ?2")
             .bind(user_id)
             .bind(keep.as_slice())
