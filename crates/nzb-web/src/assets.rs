@@ -36,7 +36,7 @@ pub const ASSETS: &[Asset] = &[
         name: "app.css",
         mime: "text/css; charset=utf-8",
         bytes: include_bytes!("../../../static/app.css"),
-        sha256: "dca541b682c2ca5bc70a54aca51fdb660c4ebfd5865c328c55eb0206dd4021f0",
+        sha256: "0145a7e6e04ca369e942a3fab98ad283d28d335e7066eb423774337bb1a13825",
     },
     Asset {
         name: "app.js",
