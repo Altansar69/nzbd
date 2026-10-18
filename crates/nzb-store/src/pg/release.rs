@@ -4,7 +4,7 @@
 //! Every transaction that creates a release, changes an indexed field of one or removes one also writes, in the SAME
 //! transaction, one `search_outbox` row per release (payload-free: the indexer reads the current state, SEC-092), the
 //! `category_stats` deltas (exact tiles without a scan) and, for edits, bumps `release.index_version`. Locks follow the
-//! global order: the acting account row `FOR SHARE` (re-validation, N9), release rows `FOR UPDATE` in ascending id,
+//! global order: the acting account then session rows `FOR SHARE` (re-validation, N9), release rows `FOR UPDATE` in ascending id,
 //! `category_stats` rows in ascending category id, the audit chain state last (`audit_append`).
 //!
 //! Listing, sorting, text search and counts are not here: they belong to the search index (T113, `nzb-search`); this
@@ -286,6 +286,23 @@ pub(crate) async fn require_actor_share(
     }
 }
 
+/// Locks the account before its browser session, keeping revocation serialized with the mutation.
+/// A missing session is reserved for trusted operator/internal callers.
+pub(crate) async fn require_session_actor_share(
+    conn: &mut PgConnection,
+    actor: &AccountActor,
+    min: Role,
+    now: i64,
+) -> Result<crate::account::Subject, StoreError> {
+    let account = require_actor_share(conn, actor.user_id, min).await?;
+    if let Some(hash) = &actor.session
+        && !crate::pg::auth::session_is_live(conn, hash, actor.user_id, now).await?
+    {
+        return Err(AccountError::Forbidden.into());
+    }
+    Ok(account)
+}
+
 /// Validates the uploader inside `conn` and returns the account to record (`None` = unattributed). The key row and
 /// its owner's row are share-locked until the commit (N9 on Postgres: a concurrent revoke or disable waits for this
 /// upload, and an upload after it is refused).
@@ -295,11 +312,19 @@ pub(crate) async fn require_actor_share(
 pub(crate) async fn resolve_uploader(
     conn: &mut PgConnection,
     uploader: &Uploader,
+    now: i64,
 ) -> Result<Option<i64>, StoreError> {
     match *uploader {
         Uploader::Unattributed => Ok(None),
         Uploader::Account(id) => {
             let a = require_actor_share(conn, id, Role::Uploader).await?;
+            Ok(Some(a.id))
+        }
+        Uploader::Session { user_id, id_hash } => {
+            let a = require_actor_share(conn, user_id, Role::Uploader).await?;
+            if !crate::pg::auth::session_is_live(conn, &id_hash, user_id, now).await? {
+                return Err(AccountError::Forbidden.into());
+            }
             Ok(Some(a.id))
         }
         Uploader::ApiKey(key_id) => {
@@ -653,15 +678,15 @@ impl PgDb {
         // (a) Uploaders, share-locked until the commit (lock order 1 before anything else).
         let mut uploaders = UploaderCache::default();
         for (i, it) in items.iter().enumerate() {
-            let verdict = if let Some(v) = uploaders.get(&it.uploader) {
+            let verdict = if let Some(v) = uploaders.get(&it.uploader, it.new.ingested_at) {
                 v
             } else {
-                let v = match resolve_uploader(&mut tx, &it.uploader).await {
+                let v = match resolve_uploader(&mut tx, &it.uploader, it.new.ingested_at).await {
                     Ok(v) => Ok(v),
                     Err(StoreError::Account(a)) => Err(a),
                     Err(e) => return Err(e),
                 };
-                uploaders.put(it.uploader, v);
+                uploaders.put(it.uploader, it.new.ingested_at, v);
                 v
             };
             match verdict {
@@ -871,7 +896,7 @@ impl PgDb {
         let label = new.source_label.and_then(clean_source_label);
         let category = cat_i32(new.category_id)?;
         let mut tx = self.ingest().begin().await?;
-        let added_by = resolve_uploader(&mut tx, uploader).await?;
+        let added_by = resolve_uploader(&mut tx, uploader, new.ingested_at).await?;
         // The unique index arbitrates concurrent ingests of the same bytes: no error, no aborted transaction.
         let id: Option<i64> = sqlx::query_scalar(
             "INSERT INTO release (sha256, title, category_id, category_overridden, posted_at, ingested_at, \
@@ -977,7 +1002,7 @@ impl PgDb {
         let mut tx = self.ingest().begin().await?;
         let user = match *uploader {
             Uploader::Unattributed => None,
-            Uploader::Account(id) => Some(id),
+            Uploader::Account(id) | Uploader::Session { user_id: id, .. } => Some(id),
             Uploader::ApiKey(key) => {
                 sqlx::query_scalar::<_, Option<i64>>("SELECT owner_id FROM api_key WHERE id = $1")
                     .bind(key)
@@ -995,12 +1020,12 @@ impl PgDb {
     ///
     /// # Errors
     /// [`AccountError::Forbidden`] / [`AccountError::KeyRefused`]; database failure.
-    pub async fn validate_uploader(&self, uploader: &Uploader) -> Result<(), StoreError> {
+    pub async fn validate_uploader(&self, uploader: &Uploader, now: i64) -> Result<(), StoreError> {
         if matches!(uploader, Uploader::Unattributed) {
             return Ok(());
         }
         let mut tx = self.ingest().begin().await?;
-        resolve_uploader(&mut tx, uploader).await?;
+        resolve_uploader(&mut tx, uploader, now).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1333,7 +1358,7 @@ impl PgDb {
     ) -> Result<u32, StoreError> {
         let category = cat_i32(category_id)?;
         let mut tx = self.web().begin().await?;
-        let a = require_actor_share(&mut tx, actor.user_id, Role::Admin).await?;
+        let a = require_session_actor_share(&mut tx, actor, Role::Admin, now).await?;
         let old = Self::lock_release(&mut tx, release_id)
             .await?
             .ok_or(StoreError::NotFound)?;
@@ -1375,7 +1400,7 @@ impl PgDb {
     ) -> Result<Option<String>, StoreError> {
         let clean = label.and_then(clean_source_label);
         let mut tx = self.web().begin().await?;
-        let a = require_actor_share(&mut tx, actor.user_id, Role::Admin).await?;
+        let a = require_session_actor_share(&mut tx, actor, Role::Admin, now).await?;
         let old: Option<String> =
             sqlx::query_scalar("SELECT source_label FROM release WHERE id = $1 FOR UPDATE")
                 .bind(release_id)
@@ -1451,7 +1476,7 @@ impl PgDb {
         now: i64,
         ip: Option<&str>,
     ) -> Result<TrashRow, StoreError> {
-        self.trash_release_inner(id, None, now, ip, TrashActor::Account(actor.user_id))
+        self.trash_release_inner(id, None, now, ip, TrashActor::Account(actor))
             .await
     }
 
@@ -1468,14 +1493,8 @@ impl PgDb {
         now: i64,
         ip: Option<&str>,
     ) -> Result<TrashRow, StoreError> {
-        self.trash_release_inner(
-            id,
-            Some(expected),
-            now,
-            ip,
-            TrashActor::Account(actor.user_id),
-        )
-        .await
+        self.trash_release_inner(id, Some(expected), now, ip, TrashActor::Account(actor))
+            .await
     }
 
     /// The trash transaction: release row locked, moved into `release_trash` (one row per digest), files cascade,
@@ -1491,11 +1510,11 @@ impl PgDb {
     ) -> Result<TrashRow, StoreError> {
         let mut tx = self.web().begin().await?;
         let (who, deleted_by) = match actor {
-            TrashActor::Account(uid) => {
-                let a = require_actor_share(&mut tx, uid, Role::Admin).await?;
+            TrashActor::Account(actor) => {
+                let a = require_session_actor_share(&mut tx, actor, Role::Admin, now).await?;
                 (
                     Some(AuditActor::account(a.id, a.role, &a.username)),
-                    Some(uid),
+                    Some(a.id),
                 )
             }
             TrashActor::Text(_) => (None, None),

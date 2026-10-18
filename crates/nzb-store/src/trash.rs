@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use nzb_core::Sha256;
 use sqlx::Row;
 
-use crate::account::{AuditActor, Role, require_actor, write_audit};
+use crate::account::{AuditActor, Role, require_session_actor, write_audit};
 use crate::attribution::TrashActor;
 use crate::fs_store::NzbStore;
 use crate::{SqliteDb, StoreError};
@@ -138,11 +138,11 @@ impl SqliteDb {
         let mut tx = self.begin_immediate().await?;
         // An account actor is validated first (admin, live, enabled): a refused role reads nothing.
         let (who, deleted_by) = match actor {
-            TrashActor::Account(uid) => {
-                let a = require_actor(&mut tx, uid, Role::Admin).await?;
+            TrashActor::Account(actor) => {
+                let a = require_session_actor(&mut tx, actor, Role::Admin, now).await?;
                 (
                     Some(AuditActor::account(a.id, a.role, &a.username)),
-                    Some(uid),
+                    Some(a.id),
                 )
             }
             TrashActor::Text(_) => (None, None),

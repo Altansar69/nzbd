@@ -26,6 +26,125 @@ fn attempt(uid: i64, factor: SecondFactor, now: i64) -> FactorAttempt<'static> {
 
 const TOKEN: [u8; 32] = [5; 32];
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn sec_024_password_change_locks_account_before_session() {
+    use sqlx::Connection;
+    use std::time::Duration;
+
+    for revoke_while_waiting in [false, true] {
+        let (t, db, uid) = open().await;
+        let old = NewSession {
+            id_hash: [80; 32],
+            user_id: uid,
+            stage: SessionStage::Active,
+            csrf_token: [9; 32],
+            now: 100,
+            expires_at: 10_000,
+            ip: None,
+            user_agent: None,
+        };
+        db.insert_session(&old, 5).await.unwrap();
+        let replacement = NewSession {
+            id_hash: [81; 32],
+            ..old.clone()
+        };
+        let mut holder = t.app_conn().await;
+        let mut observer = t.superuser_conn().await;
+        let mut mutation = holder.begin().await.unwrap();
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *mutation)
+            .await
+            .unwrap();
+        // A release mutation has locked the account and has not yet reached its session check.
+        sqlx::query("SELECT id FROM account WHERE id = $1 FOR SHARE")
+            .bind(uid)
+            .execute(&mut *mutation)
+            .await
+            .unwrap();
+        let change = db.change_password(uid, &old.id_hash, "changed", &replacement, None, 150);
+        let finish_mutation = async {
+            // Wait for an actual server lock wait, never for a guessed scheduling delay.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                         WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+                    )
+                    .bind(holder_pid)
+                    .fetch_one(&mut observer)
+                    .await
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("password change must wait for the account lock");
+            // If change_password deleted the session first, this errors immediately with 55P03:
+            // each transaction would otherwise wait for the row held by the other.
+            let live: Result<Option<i32>, _> =
+                sqlx::query_scalar("SELECT 1 FROM session WHERE id_hash = $1 FOR SHARE NOWAIT")
+                    .bind(old.id_hash.as_slice())
+                    .fetch_optional(&mut *mutation)
+                    .await;
+            assert!(
+                matches!(live, Ok(Some(1))),
+                "session locked before account: {live:?}"
+            );
+            if revoke_while_waiting {
+                sqlx::query("DELETE FROM session WHERE id_hash = $1")
+                    .bind(old.id_hash.as_slice())
+                    .execute(&mut *mutation)
+                    .await
+                    .unwrap();
+            }
+            mutation.commit().await.unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(change, finish_mutation)
+        })
+        .await
+        .expect("both transactions must finish");
+        if revoke_while_waiting {
+            assert!(matches!(result, Err(StoreError::NotFound)), "{result:?}");
+        } else {
+            result.unwrap();
+        }
+        let password: String =
+            sqlx::query_scalar("SELECT password_hash FROM account WHERE id = $1")
+                .bind(uid)
+                .fetch_one(db.web())
+                .await
+                .unwrap();
+        assert_eq!(
+            password,
+            if revoke_while_waiting {
+                "hash"
+            } else {
+                "changed"
+            }
+        );
+        assert!(db.get_session(&old.id_hash).await.unwrap().is_none());
+        assert_eq!(
+            db.get_session(&replacement.id_hash)
+                .await
+                .unwrap()
+                .is_some(),
+            !revoke_while_waiting
+        );
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE event = 'user.password_changed'",
+        )
+        .fetch_one(db.web())
+        .await
+        .unwrap();
+        assert_eq!(audits, i64::from(!revoke_while_waiting));
+    }
+}
+
 async fn enroll(db: &PgDb, uid: i64, step: i64, codes: &[[u8; 32]]) {
     assert!(db.set_enrollment_token(&TOKEN, 10_000, 50).await.unwrap());
     assert!(

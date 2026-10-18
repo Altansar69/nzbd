@@ -339,9 +339,9 @@ impl Job {
     }
 
     /// The submitting account or API key (default: unattributed, as for the watch folder). The
-    /// store re-validates it in the transaction that writes the row: a key revoked or an owner
-    /// disabled while the body streamed is refused with [`IngestError::UploaderRefused`] and
-    /// nothing is written.
+    /// store re-validates it in the transaction that writes the row: a session expired/revoked,
+    /// a key revoked or an owner disabled while the body streamed is refused with
+    /// [`IngestError::UploaderRefused`] and nothing is written.
     #[must_use]
     pub fn with_uploader(mut self, uploader: Uploader) -> Self {
         self.uploader = uploader;
@@ -968,7 +968,9 @@ impl Pipeline {
         let mut one_by_one = Vec::with_capacity(group.len());
         for r in group.iter_mut() {
             let res = {
-                let item = [r.item(now)];
+                // A failed group may have waited for a database lock. Recheck credentials with
+                // a fresh injected wall-clock value for each retry, rather than its old timestamp.
+                let item = [r.item(self.now())];
                 self.insert_caught(&item, hold).await
             };
             one_by_one.push(res.map_or_else(
@@ -1291,7 +1293,7 @@ impl Pipeline {
 
         // Step 2: already indexed? An uploader that is no longer usable learns nothing about the
         // library either (N9): validated before the duplicate answer as well as in the insert.
-        if let Err(e) = inner.db.validate_uploader(&job.uploader).await {
+        if let Err(e) = inner.db.validate_uploader(&job.uploader, self.now()).await {
             return Err(uploader_error(e));
         }
         if let Some(row) = inner.db.get_release_by_sha(&sha.to_hex()).await? {

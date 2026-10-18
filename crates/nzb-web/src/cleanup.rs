@@ -724,23 +724,15 @@ async fn post_purge(
     };
     let task_st = st.clone();
     let actor = actor(&sess);
-    // The acting admin is re-validated before every batch (SEC-060, L5): a purge started by an
-    // account that is disabled, demoted or deleted mid-run stops at the next batch.
-    let gate: cleanup::PurgeGate = {
-        let handle = tokio::runtime::Handle::current();
-        let db = st.deps.env.db.clone();
-        let uid = sess.user_id;
-        let hook = st.deps.on_batch.clone();
-        Arc::new(move || {
-            if let Some(h) = &hook {
-                h();
-            }
-            matches!(
-                handle.block_on(db.get_account(uid)),
-                Ok(Some(a)) if a.is_enabled() && a.role == nzb_store::Role::Admin
-            )
-        })
-    };
+    // Check the initiating session as well as the account before every batch: logout,
+    // expiry, disabling or demotion stops an already running purge at the next batch.
+    let gate = purge_gate(
+        st.deps.env.db.clone(),
+        sess.user_id,
+        sess.id_hash,
+        Arc::clone(&st.deps.clock),
+        st.deps.on_batch.clone(),
+    );
     let job = tokio::spawn(async move {
         let _permit = permit;
         let started = task_st.deps.clock.now_secs();
@@ -790,5 +782,103 @@ async fn post_purge(
         Ok(_) => internal(),
         // Still running: the task continues on its own and the panel shows the result later.
         Err(_) => see_other("/admin/cleanup?purge=started", None),
+    }
+}
+
+fn purge_gate(
+    db: nzb_store::Store,
+    uid: i64,
+    id_hash: [u8; 32],
+    clock: Arc<dyn WallClock>,
+    hook: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> cleanup::PurgeGate {
+    let handle = tokio::runtime::Handle::current();
+    Arc::new(move || {
+        if let Some(h) = &hook {
+            h();
+        }
+        matches!(
+            handle.block_on(db.session_actor(&id_hash, clock.now_secs())),
+            Ok(Some(a)) if a.user_id == uid
+                && a.role == nzb_store::Role::Admin
+                && a.stage == nzb_store::SessionStage::Active
+        )
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::auth::ManualWallClock;
+    use nzb_store::{NewAccount, NewSession, Role, SessionStage};
+
+    async fn check(gate: &cleanup::PurgeGate) -> bool {
+        let gate = Arc::clone(gate);
+        tokio::task::spawn_blocking(move || gate()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn sec_060_purge_requires_live_initiating_session_before_each_batch() {
+        const NOW: i64 = 3_000;
+        let dir = tempfile::tempdir().unwrap();
+        let test_store = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let db = test_store.store.clone();
+        let uid = db
+            .create_account_operator(
+                &NewAccount {
+                    username: "root",
+                    password_hash: "$argon2id$v=19$m=65536,t=3,p=1$c2FsdA$aGFzaA",
+                    role: Some(Role::Admin),
+                },
+                crate::auth::AuthConfig::default().account_policy(),
+                NOW,
+            )
+            .await
+            .unwrap();
+        let mut session = NewSession {
+            id_hash: [71; 32],
+            user_id: uid,
+            stage: SessionStage::Active,
+            csrf_token: [72; 32],
+            now: NOW,
+            expires_at: NOW + 10,
+            ip: None,
+            user_agent: None,
+        };
+        db.insert_session(&session, 5).await.unwrap();
+        let clock = Arc::new(ManualWallClock::new(NOW));
+        let gate = purge_gate(db.clone(), uid, session.id_hash, clock.clone(), None);
+        assert!(check(&gate).await);
+        assert!(db.delete_session(&session.id_hash).await.unwrap());
+        assert!(db.get_account(uid).await.unwrap().unwrap().is_enabled());
+        assert!(!check(&gate).await, "logout must stop the next purge batch");
+
+        session.stage = SessionStage::PendingMfa;
+        db.insert_session(&session, 5).await.unwrap();
+        assert!(
+            !check(&gate).await,
+            "an incomplete MFA session is insufficient"
+        );
+        assert!(db.delete_session(&session.id_hash).await.unwrap());
+        session.stage = SessionStage::Active;
+        db.insert_session(&session, 5).await.unwrap();
+        assert!(check(&gate).await);
+        clock.advance(10);
+        assert!(
+            !check(&gate).await,
+            "expiry equality must stop the next batch"
+        );
+
+        session.id_hash = [73; 32];
+        session.now = NOW + 10;
+        session.expires_at = NOW + 20;
+        db.insert_session(&session, 5).await.unwrap();
+        assert!(
+            !check(&gate).await,
+            "a replacement login cannot revive the old purge"
+        );
+        let replacement = purge_gate(db, uid, session.id_hash, clock, None);
+        assert!(check(&replacement).await);
     }
 }

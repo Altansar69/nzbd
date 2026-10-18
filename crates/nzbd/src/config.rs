@@ -1183,6 +1183,26 @@ fn apply_env(table: &mut toml::Table, vars: impl IntoIterator<Item = (String, St
     }
 }
 
+/// Reads only configuration overrides. `env::vars` panics on any non-Unicode value and
+/// includes that value in the panic, even when the variable is unrelated to configuration.
+fn config_environment(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<Vec<(String, String)>, ConfigError> {
+    let mut overrides = Vec::new();
+    for (key, value) in vars {
+        if !key.as_encoded_bytes().starts_with(ENV_PREFIX.as_bytes()) {
+            continue;
+        }
+        let error =
+            || ConfigError::Invalid("NZBD__ configuration overrides must use valid UTF-8".into());
+        overrides.push((
+            key.into_string().map_err(|_| error())?,
+            value.into_string().map_err(|_| error())?,
+        ));
+    }
+    Ok(overrides)
+}
+
 /// Sets `table[path...][leaf] = value`, creating (or replacing non-table) intermediates.
 fn insert_path(table: &mut toml::Table, path: &[String], leaf: &str, value: toml::Value) {
     match path.split_first() {
@@ -1209,7 +1229,7 @@ impl Config {
     /// # Errors
     /// Unreadable file, bad TOML, unknown keys or wrong types.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
-        Self::load_with_env(path, std::env::vars())
+        Self::load_with_env(path, config_environment(std::env::vars_os())?)
     }
 
     /// Like [`Config::load`] with an explicit environment (deterministic tests).
@@ -1541,6 +1561,53 @@ pub fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_unicode_unrelated_environment_is_ignored_without_reading_its_value() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let vars = config_environment([
+            (
+                OsString::from("UNRELATED_SECRET"),
+                OsString::from_vec(b"AUDIT_FAKE_SECRET\xff".to_vec()),
+            ),
+            (
+                OsString::from_vec(b"UNRELATED\xff".to_vec()),
+                OsString::from("AUDIT_FAKE_VALUE"),
+            ),
+            (
+                OsString::from("NZBD__limits__max_file_bytes"),
+                OsString::from("2048"),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(vars.len(), 1);
+        let config = Config::load_with_env(None, vars).unwrap();
+        assert_eq!(config.limits.max_file_bytes, 2048);
+    }
+
+    #[test]
+    fn non_unicode_config_overrides_fail_without_disclosing_names_or_values() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        for entry in [
+            (
+                OsString::from("NZBD__db__password_file"),
+                OsString::from_vec(b"AUDIT_FAKE_VALUE\xff".to_vec()),
+            ),
+            (
+                OsString::from_vec(b"NZBD__AUDIT_FAKE_NAME\xff".to_vec()),
+                OsString::from("AUDIT_FAKE_VALUE"),
+            ),
+        ] {
+            let error = config_environment([entry]).unwrap_err();
+            let output = format!("{error} {error:?}");
+            assert!(!output.contains("AUDIT_FAKE"));
+            assert!(output.contains("valid UTF-8"));
+        }
+    }
 
     fn tmp_cfg(dir: &Path, key_mode: u32) -> Config {
         for d in ["watch", "store", "failed", "duplicates", "tmp", "backups"] {

@@ -513,15 +513,27 @@ pub(crate) fn check_group(items: &[GroupItem<'_>]) -> Result<(), StoreError> {
 
 /// Uploader verdicts of one group transaction (a group holds few distinct uploaders; a linear scan is enough).
 #[derive(Default)]
-pub(crate) struct UploaderCache(Vec<(Uploader, Result<Option<i64>, crate::AccountError>)>);
+pub(crate) struct UploaderCache(Vec<(Uploader, i64, Result<Option<i64>, crate::AccountError>)>);
 
 impl UploaderCache {
-    pub(crate) fn get(&self, u: &Uploader) -> Option<Result<Option<i64>, crate::AccountError>> {
-        self.0.iter().find(|(k, _)| k == u).map(|(_, v)| *v)
+    pub(crate) fn get(
+        &self,
+        u: &Uploader,
+        now: i64,
+    ) -> Option<Result<Option<i64>, crate::AccountError>> {
+        self.0
+            .iter()
+            .find(|(k, at, _)| k == u && *at == now)
+            .map(|(_, _, v)| *v)
     }
 
-    pub(crate) fn put(&mut self, u: Uploader, v: Result<Option<i64>, crate::AccountError>) {
-        self.0.push((u, v));
+    pub(crate) fn put(
+        &mut self,
+        u: Uploader,
+        now: i64,
+        v: Result<Option<i64>, crate::AccountError>,
+    ) {
+        self.0.push((u, now, v));
     }
 }
 
@@ -639,7 +651,7 @@ impl SqliteDb {
     ) -> Result<i64, StoreError> {
         // BEGIN IMMEDIATE: the uploader re-check and the insert are one atomic decision (N9).
         let mut tx = self.begin_immediate().await?;
-        let added_by = resolve_uploader(&mut tx, uploader).await?;
+        let added_by = resolve_uploader(&mut tx, uploader, new.ingested_at).await?;
         let id = insert_release_row(&mut tx, new, log, added_by)
             .await?
             .ok_or(StoreError::Duplicate)?;
@@ -681,15 +693,15 @@ impl SqliteDb {
                 out.push(GroupOutcome::Deferred);
                 continue;
             }
-            let added_by = if let Some(r) = uploaders.get(&it.uploader) {
+            let added_by = if let Some(r) = uploaders.get(&it.uploader, it.new.ingested_at) {
                 r
             } else {
-                let r = match resolve_uploader(&mut tx, &it.uploader).await {
+                let r = match resolve_uploader(&mut tx, &it.uploader, it.new.ingested_at).await {
                     Ok(v) => Ok(v),
                     Err(StoreError::Account(a)) => Err(a),
                     Err(e) => return Err(e),
                 };
-                uploaders.put(it.uploader, r);
+                uploaders.put(it.uploader, it.new.ingested_at, r);
                 r
             };
             let added_by = match added_by {

@@ -507,6 +507,14 @@ impl PgDb {
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.begin_account().await?;
+        // Release mutations and uploads lock the account before the session. Take the account's
+        // final lock mode now: deleting the session first could deadlock with those readers.
+        let _: i64 = sqlx::query_scalar("SELECT id FROM account WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        // Re-check the session after waiting: it may have been revoked by the preceding holder.
         let own = sqlx::query(
             "DELETE FROM session WHERE id_hash = $1 AND account_id = $2 \
              AND stage = 'active' AND expires_at > $3",

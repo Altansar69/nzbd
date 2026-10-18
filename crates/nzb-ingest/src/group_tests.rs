@@ -346,6 +346,96 @@ async fn t114_a_failed_group_is_committed_job_by_job() {
     assert_eq!(shas.len(), 6, "exactly one ok row per job");
 }
 
+/// A session can expire while a failed batch waits for its individual retries. The injected
+/// clock advances only after preparation, so a retry using the original batch time is rejected
+/// by this regression even though the account itself remains enabled.
+#[tokio::test]
+async fn sec_036_upload_commit_retries_refresh_session_expiry() {
+    struct RetryClock {
+        wall: Arc<FakeWall>,
+        step: AtomicI64,
+    }
+    impl WallClock for RetryClock {
+        fn now_unix(&self) -> i64 {
+            self.wall
+                .0
+                .fetch_add(self.step.load(Ordering::SeqCst), Ordering::SeqCst)
+        }
+    }
+
+    let mut e = env(OPTS).await;
+    let clock = Arc::new(RetryClock {
+        wall: Arc::clone(&e.wall),
+        step: AtomicI64::new(0),
+    });
+    e.pipeline = Pipeline::new(
+        cfg(&e.watch, &e.failed, &e.dups, OPTS),
+        e.db.clone(),
+        e.store.clone(),
+        clock.clone(),
+    )
+    .unwrap();
+    let user_id =
+        e.db.create_account_operator(
+            &nzb_store::NewAccount {
+                username: "uploader",
+                password_hash: "unused-test-hash",
+                role: None,
+            },
+            nzb_store::AccountPolicy::default(),
+            T0,
+        )
+        .await
+        .unwrap();
+    let id_hash = [7; 32];
+    e.db.insert_session(
+        &nzb_store::NewSession {
+            id_hash,
+            user_id,
+            stage: nzb_store::SessionStage::Active,
+            csrf_token: [8; 32],
+            now: T0,
+            expires_at: T0 + 1,
+            ip: None,
+            user_agent: None,
+        },
+        5,
+    )
+    .await
+    .unwrap();
+    let mut group = Vec::new();
+    for n in 0..2 {
+        let job = Job::upload(
+            nzb_store::LogSource::UploadUi,
+            Payload::Bytes(nzb(&format!("{SHOW}.{n}"))),
+        )
+        .with_uploader(nzb_store::Uploader::Session { user_id, id_hash });
+        match e.pipeline.prepare(job).await {
+            crate::pipeline::Prepared::Ready(r) => group.push(*r),
+            crate::pipeline::Prepared::Done(r) => panic!("not prepared: {r:?}"),
+        }
+    }
+    assert_eq!(group.len(), 2);
+    assert_eq!(clock.now_unix(), T0);
+    e.pipeline.fail_next_group();
+    clock.step.store(1, Ordering::SeqCst);
+    let done = e.pipeline.commit(group, DEFAULT_WRITER_HOLD).await;
+    assert_eq!(done.len(), 2);
+    for (ready, result) in done {
+        assert!(matches!(
+            result,
+            crate::pipeline::Committed::Failed(IngestError::UploaderRefused)
+        ));
+        assert!(matches!(
+            e.pipeline.finish(ready, result).await,
+            Err(IngestError::UploaderRefused)
+        ));
+    }
+    assert_eq!(e.release_count().await, 0);
+    assert_eq!(e.db.search_outbox_lag().await.unwrap().depth, 0);
+    assert_eq!(e.db.list_ingest_log(10).await.unwrap().len(), 0);
+}
+
 /// A panic inside a group commit is contained: the group (rolled back) is committed job by job, the
 /// other jobs are inserted and only the job that panics alone fails, counted as a panic; the writer
 /// (and so the process) keeps running.

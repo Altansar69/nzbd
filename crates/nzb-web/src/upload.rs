@@ -593,9 +593,10 @@ enum Mode {
     Ui {
         /// Token the `csrf_token` part must equal; `None` when the header already proved it.
         expect_csrf: Option<String>,
-        /// Per-ACCOUNT bucket key (SEC-029, T101: several sessions of one account share one
-        /// budget) and the account recorded as the uploader.
-        session: [u8; 32],
+        /// Per-account bucket key (SEC-029, T101: sessions of one account share one budget).
+        account_bucket: [u8; 32],
+        /// The actual session hash, revalidated by the ingest transaction after reading the body.
+        id_hash: [u8; 32],
         user_id: i64,
         client: Option<IpAddr>,
         /// Per-IP upload bucket; the rate-limit layer already spent the request's first token,
@@ -754,7 +755,7 @@ async fn read_parts(
 ) -> Result<(), Rejected> {
     // Hiding categories is a UI display rule; API ingestion still accepts every taxonomy id.
     let mut hidden: Arc<[u16]> = Arc::from(Vec::new());
-    let (api, mut hint, mut label, mut csrf_pending, mut charges, ui_user, audit_user, audit_ip) =
+    let (api, mut hint, mut label, mut csrf_pending, mut charges, ui_actor, audit_user, audit_ip) =
         match mode {
             Mode::Api {
                 key,
@@ -765,7 +766,8 @@ async fn read_parts(
             } => (Some(key), hint, label, None, None, None, owner, ip),
             Mode::Ui {
                 expect_csrf,
-                session,
+                account_bucket,
+                id_hash,
                 user_id,
                 client,
                 ip,
@@ -778,11 +780,11 @@ async fn read_parts(
                     None,
                     expect_csrf,
                     Some(Charges {
-                        session,
+                        session: account_bucket,
                         ip,
                         ip_first_free: true,
                     }),
-                    Some(user_id),
+                    Some((user_id, id_hash)),
                     Some(user_id),
                     client,
                 )
@@ -798,9 +800,9 @@ async fn read_parts(
     let origin = Origin {
         source,
         key: api.flatten(),
-        uploader: match (api.flatten(), ui_user) {
+        uploader: match (api.flatten(), ui_actor) {
             (Some(k), _) => Uploader::ApiKey(k),
-            (None, Some(u)) => Uploader::Account(u),
+            (None, Some((user_id, id_hash))) => Uploader::Session { user_id, id_hash },
             (None, None) => Uploader::Unattributed,
         },
         who: Who {
@@ -1254,7 +1256,8 @@ async fn ui_post(
     };
     let mode = Mode::Ui {
         expect_csrf,
-        session: account_key(sess.user_id),
+        account_bucket: account_key(sess.user_id),
+        id_hash: sess.id_hash,
         user_id: sess.user_id,
         client: client_ip,
         ip,
@@ -1291,5 +1294,277 @@ mod hint_tests {
         assert!(resolve_hint(&tax, &hidden, "6010").is_err());
         assert!(resolve_hint(&tax, &hidden, "nope").is_err());
         assert!(resolve_hint(&tax, &hidden, "  ").is_ok_and(|h| h.is_none()));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::too_many_lines)]
+
+    use super::*;
+    use axum::body::{Body, Bytes};
+    use axum::http::Request;
+    use futures_util::{StreamExt as _, stream};
+    use nzb_ingest::{DuplicatesAction, Pipeline, PipelineConfig};
+    use nzb_store::prelude::*;
+    use nzb_store::{AccountPolicy, FsStore, NewAccount, SessionStage};
+    use nzb_testkit::{FileSpec, NzbBuilder};
+    use tokio::sync::oneshot;
+    use tower::ServiceExt as _;
+
+    use crate::auth::{AuthConfig, AuthState, ClientMeta, ManualWallClock};
+
+    struct IngestClock(Arc<ManualWallClock>);
+
+    impl nzb_ingest::WallClock for IngestClock {
+        fn now_unix(&self) -> i64 {
+            self.0.now_secs()
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum DuringBody {
+        Logout,
+        Expire,
+        KeepSession,
+        ApiAfterLogout,
+    }
+
+    /// The first body chunk has passed the real session/CSRF gate before `waiting` fires. The
+    /// complete NZB and closing boundary remain unavailable until the caller explicitly resumes.
+    fn suspended_body(bytes: &[u8]) -> (Body, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let middle = bytes.len() / 2;
+        let mut head = b"--upload-test\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.nzb\"\r\nContent-Type: application/x-nzb\r\n\r\n".to_vec();
+        head.extend_from_slice(&bytes[..middle]);
+        let mut tail = bytes[middle..].to_vec();
+        tail.extend_from_slice(b"\r\n--upload-test--\r\n");
+        let (waiting, reached) = oneshot::channel();
+        let (resume, paused) = oneshot::channel();
+        let first = stream::iter([Ok::<_, std::io::Error>(Bytes::from(head))]);
+        let rest = stream::once(async move {
+            let _ = waiting.send(());
+            paused
+                .await
+                .map_err(|_| std::io::Error::other("upload test cancelled"))?;
+            Ok::<_, std::io::Error>(Bytes::from(tail))
+        });
+        (Body::from_stream(first.chain(rest)), reached, resume)
+    }
+
+    fn authenticated_request(path: &str, cookie: &str, csrf: &str) -> axum::http::request::Builder {
+        Request::post(path)
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(header::COOKIE, cookie)
+            .header("x-csrf-token", csrf)
+    }
+
+    #[tokio::test]
+    async fn sec_036_ui_upload_rechecks_session_after_suspended_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let test_store = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let db = test_store.store.clone();
+        let user_id = db
+            .create_account_operator(
+                &NewAccount {
+                    username: "uploader",
+                    password_hash: "unused-test-hash",
+                    role: None,
+                },
+                AccountPolicy::default(),
+                1_700_000_000,
+            )
+            .await
+            .unwrap();
+        let clock = Arc::new(ManualWallClock::new(1_700_000_000));
+        let auth = AuthState::new(
+            db.clone(),
+            AuthConfig {
+                idle_secs: 10,
+                insecure_cookies: true,
+                ..AuthConfig::default()
+            },
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let mkdir = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            path
+        };
+        let staging = mkdir("tmp");
+        let pipeline = Pipeline::new(
+            PipelineConfig {
+                limits: nzb_core::Limits::default(),
+                watch_dir: mkdir("watch"),
+                failed_dir: mkdir("failed"),
+                duplicates_dir: mkdir("duplicates"),
+                duplicates_action: DuplicatesAction::Move,
+                category_from_subfolder: false,
+                failed_uploads_max_files: 0,
+                failed_uploads_max_bytes: 0,
+            },
+            db.clone(),
+            Arc::new(FsStore::open(mkdir("store")).unwrap()),
+            Arc::new(IngestClock(Arc::clone(&clock))),
+        )
+        .unwrap();
+        let (handle, workers) = pipeline.spawn_workers(1);
+        let deps = UploadDeps::new(
+            handle,
+            Arc::new(Taxonomy::builtin().unwrap()),
+            staging.clone(),
+            64 * 1024,
+        )
+        .with_audit(db.clone(), clock.clone());
+        let app = crate::router_with_upload(
+            &crate::WebConfig {
+                insecure_cookies: true,
+                ..crate::WebConfig::default()
+            },
+            &auth,
+            ui_routes(deps.clone()),
+            Some(api_route(deps)),
+        );
+        let (_, api_key) = crate::apikey::issue(
+            &db,
+            "upload control",
+            clock.now_secs(),
+            nzb_store::Actor {
+                name: "cli",
+                ip: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut accepted = 0;
+        for (n, action) in [
+            DuringBody::Logout,
+            DuringBody::Expire,
+            DuringBody::KeepSession,
+            DuringBody::ApiAfterLogout,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (set_cookie, csrf) = auth
+                .start_session_full(user_id, SessionStage::Active, &ClientMeta::default(), None)
+                .await
+                .unwrap();
+            let cookie = set_cookie.to_str().unwrap().split(';').next().unwrap();
+            let api = matches!(action, DuringBody::ApiAfterLogout);
+            let bytes = NzbBuilder::new()
+                .file(FileSpec::new(&format!("\"upload.{n}.mkv\" yEnc (1/2)")).segments(2))
+                .build();
+            let sha = crate::crypto::hex(&crate::crypto::sha256(&bytes));
+            let (body, reached, resume) = suspended_body(&bytes);
+            let mut request =
+                authenticated_request(if api { "/api/v1/nzb" } else { "/upload" }, cookie, &csrf)
+                    .header(
+                        header::CONTENT_TYPE,
+                        "multipart/form-data; boundary=upload-test",
+                    );
+            if api {
+                request = request.header("x-api-key", api_key.secret.as_str());
+            }
+            let router = app.clone();
+            let request = request.body(body).unwrap();
+            let upload = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+            tokio::time::timeout(Duration::from_secs(5), reached)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !upload.is_finished(),
+                "the incomplete body must still be pending"
+            );
+            assert!(db.get_release_by_sha(&sha).await.unwrap().is_none());
+            match action {
+                DuringBody::Logout | DuringBody::ApiAfterLogout => {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            authenticated_request("/logout", cookie, &csrf)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                    let mut headers = HeaderMap::new();
+                    headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+                    assert!(auth.peek_session(&headers).await.unwrap().is_none());
+                }
+                DuringBody::Expire => clock.advance(10),
+                DuringBody::KeepSession => {}
+            }
+            resume.send(()).unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(10), upload)
+                .await
+                .unwrap()
+                .unwrap();
+            let refused = matches!(action, DuringBody::Logout | DuringBody::Expire);
+            assert_eq!(
+                response.status(),
+                if refused {
+                    StatusCode::NOT_FOUND
+                } else if api {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
+                "case {n}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            assert!(!body.contains(api_key.secret.as_str()));
+            let row = db.get_release_by_sha(&sha).await.unwrap();
+            if refused {
+                assert!(row.is_none(), "a refused upload must not publish a release");
+            } else {
+                accepted += 1;
+                let attribution = db
+                    .release_attribution(row.unwrap().id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(attribution.added_by, Some(user_id));
+            }
+            assert_eq!(
+                test_store.i64("SELECT count(*) FROM release").await,
+                accepted
+            );
+            assert_eq!(
+                test_store
+                    .i64("SELECT count(*) FROM release WHERE added_by IS NOT NULL")
+                    .await,
+                accepted
+            );
+            assert_eq!(
+                test_store.i64("SELECT count(*) FROM search_outbox").await,
+                accepted
+            );
+            assert_eq!(
+                test_store.i64("SELECT count(*) FROM ingest_log").await,
+                accepted
+            );
+            assert_eq!(
+                test_store
+                    .i64("SELECT count(*) FROM audit_log WHERE event = 'nzb_upload'")
+                    .await,
+                accepted
+            );
+            assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+        }
+        drop(app);
+        for worker in workers {
+            tokio::time::timeout(Duration::from_secs(5), worker)
+                .await
+                .unwrap()
+                .unwrap();
+        }
     }
 }

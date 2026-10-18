@@ -13,6 +13,7 @@ pg_backup_tests::sec_094_restore_requires_an_empty_schema_and_matching_version p
 pg_backup_tests::sec_094_tampered_backup_manifest_is_refused postgres Validates the PostgreSQL export table manifest, counts and checksums; SQLite VACUUM snapshots have no such manifest.
 
 # PostgreSQL has multiple writers, server roles, SECURITY DEFINER functions and server-side diagnostics.
+pg_mfa_tests::sec_024_password_change_locks_account_before_session postgres Checks PostgreSQL account/session row-lock order during concurrent password change and release mutations; SQLite serializes both through BEGIN IMMEDIATE.
 pg_release_tests::sec_095_concurrent_ingests_across_a_partition_boundary_do_not_deadlock postgres Exercises PostgreSQL partition DDL lock order and cross-process inserts across partition boundaries; SQLite tables are not partitioned.
 pg_sec_tests::sec_024_session_cap_holds_under_concurrent_logins_on_postgres postgres Exercises the PostgreSQL account-domain advisory lock across independent connections; SQLite serializes the same cap through its single writer.
 pg_sec_tests::sec_087_db_check_fails_on_excess_privileges postgres Grants forbidden table privileges and checks the PostgreSQL app-role self-test; SQLite has no database roles or GRANT.

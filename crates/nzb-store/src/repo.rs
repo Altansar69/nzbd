@@ -831,7 +831,7 @@ repo! {
         /// Digests of every deleted release (the set of trash blobs that have a record).
         fn trash_shas(&self) -> Result<HashSet<Sha256>, StoreError>;
         /// Re-validates `uploader` without writing anything (T101b).
-        fn validate_uploader(&self, uploader: &Uploader) -> Result<(), StoreError>;
+        fn validate_uploader(&self, uploader: &Uploader, now: i64) -> Result<(), StoreError>;
     }
 }
 
