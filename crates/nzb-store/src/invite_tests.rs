@@ -1751,3 +1751,52 @@ async fn admin_credential_writers_are_bound_to_the_reauthenticated_session() {
     recover(&e, &dead, m, 32, T0).await;
     assert_eq!(e.count("invite", "1=1").await, 1);
 }
+
+#[tokio::test]
+async fn recovery_secret_access_and_commit_require_unexpired_pending_session() {
+    let (e, _a, member, actor) = world().await;
+    recover(&e, &actor, member, 5, T0).await;
+    redeem(&e, 5, 50, T0 + 1).await.unwrap();
+    let sealed = b"sealed";
+    assert_eq!(
+        e.db.stage_totp_secret(member, &[50; 32], sealed, T0 + 2)
+            .await
+            .unwrap(),
+        Some(sealed.to_vec())
+    );
+    // Pending browser sessions can expire before the longer-lived staging record is purged.
+    sqlx::query("UPDATE session SET expires_at = ?1 WHERE account_id = ?2")
+        .bind(T0 + 3)
+        .bind(member)
+        .execute(e.db.writer())
+        .await
+        .unwrap();
+    assert_eq!(
+        e.db.stage_totp_secret(member, &[50; 32], b"replacement", T0 + 3)
+            .await
+            .unwrap(),
+        None
+    );
+    let replacement = sess(0, 61, SessionStage::Active, T0 + 3);
+    let c = CommitRecovery {
+        user_id: member,
+        session_hash: &[50; 32],
+        sealed,
+        step: 99,
+        recovery_hashes: &[[71; 32]],
+        new_session: &replacement,
+        ip_key: None,
+    };
+    assert_eq!(
+        err_code(e.db.commit_staged_recovery(&c, None, T0 + 3).await),
+        "STAGING_INVALID"
+    );
+    assert_eq!(password_of(&e, member).await, "old-hash");
+    assert!(
+        e.db.get_session(&replacement.id_hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(e.count("credential_staging", "1=1").await, 1);
+}

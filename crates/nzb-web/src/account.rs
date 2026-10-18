@@ -627,7 +627,7 @@ async fn post_preferences(
     let patch = nzb_store::PrefsPatch::between(sess.prefs, prefs);
     match auth
         .db()
-        .patch_user_prefs(sess.user_id, patch, Some(&ip.to_string()), auth.now())
+        .patch_user_prefs_as(&sess.actor(), patch, Some(&ip.to_string()), auth.now())
         .await
     {
         Ok(changed) => {
@@ -645,6 +645,9 @@ async fn post_preferences(
                 "Nothing changed."
             };
             render_account(&auth, &now, Some(msg), None).await
+        }
+        Err(StoreError::Account(nzb_store::AccountError::Forbidden)) => {
+            ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND").into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "preference change failed");

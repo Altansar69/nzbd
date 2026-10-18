@@ -986,6 +986,190 @@ pub(crate) async fn saved_searches_are_private_limited_and_unique<S: Repo>(s: &S
     assert_eq!(s.saved_searches(bob).await.unwrap().len(), 1);
 }
 
+/// A request admitted before its body arrives cannot mutate display state after its session stops
+/// authorizing it. The same transaction must reject every mutation before touching state or audit.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn sec_036_display_writes_recheck_session<S: Repo>(s: &S) {
+    use crate::{
+        FilePageSize, PageSize, PrefsPatch, ReleasePageSize, SessionStage, Theme, UserPrefs,
+    };
+
+    account(s, "root", Role::Admin).await;
+    let uid = account(s, "display1", Role::Viewer).await;
+    let other = account(s, "display2", Role::Viewer).await;
+    let id = s
+        .create_saved_search(uid, "Original", "{}", T0)
+        .await
+        .unwrap();
+    let original = s.saved_searches(uid).await.unwrap();
+    let template = actor(s, uid).await;
+    let before_audit = s.recent_audit(100).await.unwrap().len();
+    for (n, kind) in ["revoked", "expired", "foreign", "pending"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut session = crate::acct_testkit::sess(
+            if kind == "foreign" { other } else { uid },
+            100 + u8::try_from(n).unwrap(),
+            if kind == "pending" {
+                SessionStage::PendingMfa
+            } else {
+                SessionStage::Active
+            },
+            T0,
+        );
+        if kind == "expired" {
+            session.expires_at = T0 + 10;
+        }
+        s.insert_session(&session, 10).await.unwrap();
+        if kind == "revoked" {
+            assert!(s.delete_session(&session.id_hash).await.unwrap());
+        }
+        let stale = AccountActor {
+            session: Some(session.id_hash),
+            ..template.clone()
+        };
+        // Stage, role and owner claims in the struct do not replace checking the stored session.
+        let attempts = [
+            s.create_saved_search_as(&stale, "Unauthorized", "{}", T0 + 10)
+                .await
+                .map(|_| ()),
+            s.rename_saved_search_as(&stale, id, "Unauthorized", T0 + 10)
+                .await,
+            s.delete_saved_search_as(&stale, id, T0 + 10).await,
+            s.open_saved_search_as(&stale, id, T0 + 10)
+                .await
+                .map(|_| ()),
+            s.patch_user_prefs_as(
+                &stale,
+                PrefsPatch {
+                    theme: Some(Theme::Dark),
+                    ..PrefsPatch::default()
+                },
+                None,
+                T0 + 10,
+            )
+            .await
+            .map(|_| ()),
+            s.set_page_size_as(
+                &stale,
+                PageSize::Releases(ReleasePageSize::new(100).unwrap()),
+                None,
+                T0 + 10,
+            )
+            .await
+            .map(|_| ()),
+            s.set_page_size_as(
+                &stale,
+                PageSize::Files(FilePageSize::new(500).unwrap()),
+                None,
+                T0 + 10,
+            )
+            .await
+            .map(|_| ()),
+        ];
+        for (operation, result) in attempts.into_iter().enumerate() {
+            assert_eq!(
+                variant(&result.unwrap_err()),
+                "Account(Forbidden)",
+                "{kind}, operation {operation}"
+            );
+        }
+        assert_eq!(s.saved_searches(uid).await.unwrap(), original, "{kind}");
+        assert_eq!(
+            s.user_prefs(uid).await.unwrap(),
+            UserPrefs::default(),
+            "{kind}"
+        );
+        assert_eq!(
+            s.user_prefs(other).await.unwrap(),
+            UserPrefs::default(),
+            "{kind}"
+        );
+        assert_eq!(
+            s.recent_audit(100).await.unwrap().len(),
+            before_audit,
+            "{kind}"
+        );
+    }
+    // Positive control: all operations still work for a live viewer, with the same audit semantics.
+    let live = template;
+    let fresh = s
+        .create_saved_search_as(&live, "Fresh", "{}", T0 + 11)
+        .await
+        .unwrap();
+    s.rename_saved_search_as(&live, fresh, "Renamed", T0 + 12)
+        .await
+        .unwrap();
+    let opened = s
+        .open_saved_search_as(&live, fresh, T0 + 13)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (opened.name.as_str(), opened.last_seen_at),
+        ("Renamed", T0 + 11)
+    );
+    assert_eq!(
+        s.open_saved_search_as(&live, fresh, T0 + 12)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_seen_at,
+        T0 + 13
+    );
+    s.delete_saved_search_as(&live, fresh, T0 + 14)
+        .await
+        .unwrap();
+    assert_eq!(s.saved_searches(uid).await.unwrap(), original);
+    assert!(
+        s.patch_user_prefs_as(
+            &live,
+            PrefsPatch {
+                theme: Some(Theme::Dark),
+                ..PrefsPatch::default()
+            },
+            None,
+            T0 + 15
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        s.set_page_size_as(
+            &live,
+            PageSize::Releases(ReleasePageSize::new(100).unwrap()),
+            None,
+            T0 + 16
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        s.set_page_size_as(
+            &live,
+            PageSize::Files(FilePageSize::new(500).unwrap()),
+            None,
+            T0 + 17
+        )
+        .await
+        .unwrap()
+    );
+    let prefs = s.user_prefs(uid).await.unwrap();
+    assert_eq!(prefs.theme, Theme::Dark);
+    assert_eq!(prefs.page_size_releases.get(), 100);
+    assert_eq!(prefs.page_size_files.get(), 500);
+    assert_eq!(
+        s.recent_audit(100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.event == crate::PREF_CHANGE_EVENT)
+            .count(),
+        3
+    );
+}
+
 macro_rules! seam_suite {
     ($open:path; $($name:ident),* $(,)?) => {
         $(
@@ -1029,4 +1213,5 @@ both!(
     t133_page_sizes_are_per_account,
     t133_concurrent_preference_saves_do_not_revert_each_other,
     saved_searches_are_private_limited_and_unique,
+    sec_036_display_writes_recheck_session,
 );

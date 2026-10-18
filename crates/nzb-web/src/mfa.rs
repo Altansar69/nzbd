@@ -49,6 +49,569 @@ struct VerifyPage {
     error: Option<&'static str>,
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+mod session_tests {
+    use super::*;
+    use crate::auth::{AuthConfig, ManualWallClock};
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, header};
+    use futures_util::{StreamExt as _, stream};
+    use nzb_store::test_backend::TestStore;
+    use nzb_store::{AccountPolicy, NewAccount, NewSession, Role, Store};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+    use tower::ServiceExt as _;
+
+    const NOW: i64 = 1_700_000_000;
+
+    async fn owner(db: &Store, name: &str) -> i64 {
+        db.create_account_operator(
+            &NewAccount {
+                username: name,
+                password_hash: "unused-test-hash",
+                role: Some(Role::Admin),
+            },
+            AccountPolicy {
+                multi_user: true,
+                ..AccountPolicy::default()
+            },
+            NOW,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn confirmation_cases(token_mode: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let test = TestStore::open(dir.path()).await;
+        let db = &test.store;
+        for (index, case) in [
+            "revoked", "expired", "active", "foreign", "disabled", "live",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let uid = owner(db, &format!("owner{index}")).await;
+            let session_uid = if case == "foreign" {
+                owner(db, "other").await
+            } else {
+                uid
+            };
+            let sid = [u8::try_from(index).unwrap() + 10; 32];
+            db.insert_session(
+                &NewSession {
+                    id_hash: sid,
+                    user_id: session_uid,
+                    stage: if case == "active" {
+                        SessionStage::Active
+                    } else {
+                        SessionStage::PendingMfa
+                    },
+                    csrf_token: [21; 32],
+                    now: NOW,
+                    expires_at: NOW + 10,
+                    ip: None,
+                    user_agent: None,
+                },
+                5,
+            )
+            .await
+            .unwrap();
+            if !token_mode {
+                test.exec(&format!(
+                    "UPDATE session SET enroll_proven = true WHERE account_id = {session_uid}"
+                ))
+                .await;
+            }
+            if token_mode {
+                assert!(
+                    db.set_enrollment_token_for(uid, &[91; 32], NOW + 600, NOW)
+                        .await
+                        .unwrap()
+                );
+            }
+            db.store_pending_totp(uid, b"sealed-test", false)
+                .await
+                .unwrap();
+            if case == "revoked" {
+                assert!(db.delete_session(&sid).await.unwrap());
+            }
+            if case == "disabled" {
+                test.exec(&format!(
+                    "UPDATE account SET disabled_at = {NOW} WHERE id = {uid}"
+                ))
+                .await;
+            }
+            let context = nzb_store::AttemptContext {
+                ip_key: "192.0.2.88",
+                session: Some(&sid),
+                bucket_refused: false,
+            };
+            let confirm = EnrollConfirm {
+                user_id: uid,
+                sealed: b"sealed-test",
+                token_hash: token_mode.then_some([91; 32]),
+                step: Some(99),
+                recovery_hashes: &[[92; 32]],
+            };
+            let accepted = db
+                .confirm_totp_enrollment_v2(
+                    &confirm,
+                    &context,
+                    None,
+                    if case == "expired" { NOW + 10 } else { NOW },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                accepted,
+                case == "live",
+                "case {case}, token mode {token_mode}"
+            );
+            assert_eq!(
+                db.get_mfa_state(uid).await.unwrap().unwrap().totp_enabled,
+                case == "live"
+            );
+            assert_eq!(
+                test.i64(&format!(
+                    "SELECT count(*) FROM recovery_code WHERE account_id = {uid}"
+                ))
+                .await,
+                i64::from(case == "live")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_confirmation_requires_live_proven_session() {
+        confirmation_cases(false).await;
+    }
+
+    #[tokio::test]
+    async fn enrollment_token_does_not_replace_browser_session_authority() {
+        confirmation_cases(true).await;
+    }
+
+    #[tokio::test]
+    async fn enrollment_secret_reads_and_writes_require_live_pending_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let test = TestStore::open(dir.path()).await;
+        let db = &test.store;
+        let uid = owner(db, "owner").await;
+        let other = owner(db, "other").await;
+        let session = NewSession {
+            id_hash: [21; 32],
+            user_id: uid,
+            stage: SessionStage::PendingMfa,
+            csrf_token: [22; 32],
+            now: NOW,
+            expires_at: NOW + 10,
+            ip: None,
+            user_agent: None,
+        };
+        db.insert_session(&session, 5).await.unwrap();
+        assert_eq!(
+            db.store_pending_totp_for_session(uid, &session.id_hash, b"unproven", false, None, NOW)
+                .await
+                .unwrap(),
+            None
+        );
+        test.exec(&format!(
+            "UPDATE session SET enroll_proven = true WHERE account_id = {uid}"
+        ))
+        .await;
+        assert_eq!(
+            db.store_pending_totp_for_session(uid, &session.id_hash, b"first", false, None, NOW)
+                .await
+                .unwrap(),
+            Some(b"first".to_vec())
+        );
+        assert_eq!(
+            db.store_pending_totp_for_session(uid, &session.id_hash, b"second", false, None, NOW)
+                .await
+                .unwrap(),
+            Some(b"first".to_vec())
+        );
+        assert_eq!(
+            db.store_pending_totp_for_session(other, &session.id_hash, b"other", false, None, NOW)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.store_pending_totp_for_session(
+                uid,
+                &session.id_hash,
+                b"expired",
+                true,
+                None,
+                NOW + 10
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert!(db.delete_session(&session.id_hash).await.unwrap());
+        assert_eq!(
+            db.store_pending_totp_for_session(uid, &session.id_hash, b"revoked", true, None, NOW)
+                .await
+                .unwrap(),
+            None
+        );
+        let active = NewSession {
+            stage: SessionStage::Active,
+            ..session.clone()
+        };
+        db.insert_session(&active, 5).await.unwrap();
+        assert_eq!(
+            db.store_pending_totp_for_session(uid, &session.id_hash, b"active", true, None, NOW)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(db.delete_session(&session.id_hash).await.unwrap());
+        db.insert_session(&session, 5).await.unwrap();
+        test.exec(&format!(
+            "UPDATE account SET disabled_at = {NOW} WHERE id = {uid}"
+        ))
+        .await;
+        assert_eq!(
+            db.store_pending_totp_for_session(uid, &session.id_hash, b"disabled", true, None, NOW)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.get_mfa_state(uid)
+                .await
+                .unwrap()
+                .unwrap()
+                .totp_secret_enc,
+            Some(b"first".to_vec())
+        );
+        assert_eq!(
+            db.get_mfa_state(other)
+                .await
+                .unwrap()
+                .unwrap()
+                .totp_secret_enc,
+            None
+        );
+    }
+
+    struct SecretEnv {
+        _dir: tempfile::TempDir,
+        test: TestStore,
+        auth: AuthState,
+        session: SessionCtx,
+        clock: Arc<ManualWallClock>,
+    }
+
+    async fn secret_env(proven: bool) -> SecretEnv {
+        let dir = tempfile::tempdir().unwrap();
+        let test = TestStore::open(dir.path()).await;
+        let uid = owner(&test.store, "owner").await;
+        let clock = Arc::new(ManualWallClock::new(NOW));
+        let auth = AuthState::new(
+            test.store.clone(),
+            AuthConfig {
+                insecure_cookies: true,
+                pending_secs: 120,
+                totp_key: Some(Arc::new(totp::TotpKey::from_slice(&[37; 32]).unwrap())),
+                ..AuthConfig::default()
+            },
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let (set_cookie, _) = auth
+            .start_session_full(uid, SessionStage::PendingMfa, &ClientMeta::default(), None)
+            .await
+            .unwrap();
+        if proven {
+            test.exec(&format!(
+                "UPDATE session SET enroll_proven = true WHERE account_id = {uid}"
+            ))
+            .await;
+        }
+        let mut headers = HeaderMap::new();
+        let cookie = set_cookie.to_str().unwrap().split(';').next().unwrap();
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        let session = auth.peek_session(&headers).await.unwrap().unwrap();
+        SecretEnv {
+            _dir: dir,
+            test,
+            auth,
+            session,
+            clock,
+        }
+    }
+
+    async fn assert_secret_refused(response: Response) {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+        let bytes = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        let html = std::str::from_utf8(&bytes).unwrap();
+        assert!(!html.contains("otpauth") && !html.contains("data:image"));
+    }
+
+    #[tokio::test]
+    async fn enrollment_token_rotation_blocks_secret_creation_and_read() {
+        let e = secret_env(false).await;
+        let db = &e.test.store;
+        let uid = e.session.user_id;
+        let first = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let replacement = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let old_hash = totp::enroll_token_hash(first);
+        let new_hash = totp::enroll_token_hash(replacement);
+        assert!(
+            db.set_enrollment_token_for(uid, &old_hash, NOW + 60, NOW)
+                .await
+                .unwrap()
+        );
+        let mode = enroll_mode(&e.auth, &e.session).await.unwrap();
+        let ctx = nzb_store::AttemptContext {
+            ip_key: "192.0.2.89",
+            session: Some(&e.session.id_hash),
+            bucket_refused: false,
+        };
+        assert!(
+            db.check_enrollment_token_v2(uid, Some(old_hash), &ctx, None, NOW)
+                .await
+                .unwrap()
+        );
+        // Deterministic interleaving at the actual boundary between token verdict and secret
+        // access. Rotation clears the old secret but keeps this ordinary pending session alive.
+        assert!(
+            db.set_enrollment_token_for(uid, &new_hash, NOW + 60, NOW)
+                .await
+                .unwrap()
+        );
+        assert!(db.get_session(&e.session.id_hash).await.unwrap().is_some());
+        assert_secret_refused(show_secret(&e.auth, &e.session, &mode, first).await).await;
+        assert_eq!(
+            db.get_mfa_state(uid)
+                .await
+                .unwrap()
+                .unwrap()
+                .totp_secret_enc,
+            None
+        );
+
+        // The new token still works. An old verdict must not reveal the resulting secret either,
+        // including when the caller already holds a cached MfaState with a decryptable blob.
+        assert!(
+            db.check_enrollment_token_v2(uid, Some(new_hash), &ctx, None, NOW)
+                .await
+                .unwrap()
+        );
+        let mode = enroll_mode(&e.auth, &e.session).await.unwrap();
+        assert_eq!(
+            show_secret(&e.auth, &e.session, &mode, replacement)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let expected = db
+            .get_mfa_state(uid)
+            .await
+            .unwrap()
+            .unwrap()
+            .totp_secret_enc;
+        assert!(expected.is_some());
+        let cached = enroll_mode(&e.auth, &e.session).await.unwrap();
+        assert_secret_refused(show_secret(&e.auth, &e.session, &cached, first).await).await;
+        assert_eq!(
+            db.get_mfa_state(uid)
+                .await
+                .unwrap()
+                .unwrap()
+                .totp_secret_enc,
+            expected
+        );
+        assert_eq!(e.test.i64("SELECT count(*) FROM recovery_code").await, 0);
+    }
+
+    #[tokio::test]
+    async fn enrollment_secret_rechecks_expired_token_and_removed_proof() {
+        for proven in [false, true] {
+            let e = secret_env(proven).await;
+            let db = &e.test.store;
+            let uid = e.session.user_id;
+            let token = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+            if !proven {
+                assert!(
+                    db.set_enrollment_token_for(
+                        uid,
+                        &totp::enroll_token_hash(token),
+                        NOW + 20,
+                        NOW
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+            let mode = enroll_mode(&e.auth, &e.session).await.unwrap();
+            assert_eq!(
+                show_secret(&e.auth, &e.session, &mode, token)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let expected = db
+                .get_mfa_state(uid)
+                .await
+                .unwrap()
+                .unwrap()
+                .totp_secret_enc;
+            assert!(expected.is_some());
+            if proven {
+                e.test
+                    .exec(&format!(
+                        "UPDATE session SET enroll_proven = false WHERE account_id = {uid}"
+                    ))
+                    .await;
+            } else {
+                // The token expires first: the session is still live, so that check alone cannot help.
+                e.clock.advance(20);
+                assert_eq!(
+                    db.get_session(&e.session.id_hash)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .expires_at,
+                    NOW + 120
+                );
+            }
+            assert_secret_refused(show_secret(&e.auth, &e.session, &mode, token).await).await;
+            assert_eq!(
+                db.get_mfa_state(uid)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .totp_secret_enc,
+                expected
+            );
+            assert!(!db.get_mfa_state(uid).await.unwrap().unwrap().totp_enabled);
+            assert_eq!(e.test.i64("SELECT count(*) FROM recovery_code").await, 0);
+        }
+    }
+
+    fn post(path: &str, cookie: &str, csrf: &str) -> axum::http::request::Builder {
+        Request::post(path)
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(header::COOKIE, cookie)
+            .header("x-csrf-token", csrf)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+    }
+
+    #[tokio::test]
+    async fn enrollment_rechecks_session_after_waiting_for_body() {
+        for (seeded, expire) in [(false, false), (true, false), (false, true), (true, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let test = TestStore::open(dir.path()).await;
+            let db = test.store.clone();
+            let uid = owner(&db, "owner").await;
+            let key = Arc::new(totp::TotpKey::from_slice(&[33; 32]).unwrap());
+            if seeded {
+                let blob = totp::seal(&key, uid, b"12345678901234567890").unwrap();
+                db.store_pending_totp(uid, &blob, false).await.unwrap();
+            }
+            let before = db
+                .get_mfa_state(uid)
+                .await
+                .unwrap()
+                .unwrap()
+                .totp_secret_enc;
+            let clock = Arc::new(ManualWallClock::new(NOW));
+            let auth = AuthState::new(
+                db.clone(),
+                AuthConfig {
+                    insecure_cookies: true,
+                    pending_secs: 10,
+                    totp_key: Some(key),
+                    ..AuthConfig::default()
+                },
+                clock.clone(),
+            )
+            .await
+            .unwrap();
+            let (cookie, csrf) = auth
+                .start_session_full(uid, SessionStage::PendingMfa, &ClientMeta::default(), None)
+                .await
+                .unwrap();
+            let cookie = cookie.to_str().unwrap().split(';').next().unwrap();
+            test.exec(&format!(
+                "UPDATE session SET enroll_proven = true WHERE account_id = {uid}"
+            ))
+            .await;
+            let app = crate::router_with_auth(
+                &crate::WebConfig {
+                    insecure_cookies: true,
+                    ..crate::WebConfig::default()
+                },
+                &auth,
+                axum::Router::new(),
+            );
+            let (reached, waiting) = oneshot::channel();
+            let (resume, paused) = oneshot::channel();
+            let chunks = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"unused="))])
+                .chain(stream::once(async move {
+                    let _ = reached.send(());
+                    paused
+                        .await
+                        .map_err(|_| std::io::Error::other("cancelled test body"))?;
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"value"))
+                }));
+            let router = app.clone();
+            let request = post("/mfa/enroll", cookie, &csrf)
+                .body(Body::from_stream(chunks))
+                .unwrap();
+            let task = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+            tokio::time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!task.is_finished());
+            if expire {
+                clock.advance(10);
+            } else {
+                let response = app
+                    .oneshot(post("/logout", cookie, &csrf).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            }
+            resume.send(()).unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "seeded={seeded}, expire={expire}"
+            );
+            assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+            let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+            let html = std::str::from_utf8(&body).unwrap();
+            assert!(!html.contains("otpauth") && !html.contains("data:image"));
+            assert_eq!(
+                db.get_mfa_state(uid)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .totp_secret_enc,
+                before
+            );
+            assert_eq!(test.i64("SELECT count(*) FROM recovery_code").await, 0);
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "mfa_enroll_token.html")]
 struct TokenPage {
@@ -294,18 +857,36 @@ pub(crate) async fn post_verify(
 async fn pending_secret(
     auth: &AuthState,
     key: &totp::TotpKey,
-    uid: i64,
+    sess: &SessionCtx,
     st: &MfaState,
+    token_hash: Option<[u8; 32]>,
 ) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), Response> {
-    if let (Some(s), Some(blob)) = (secret_of_state(auth, uid, st), st.totp_secret_enc.clone()) {
-        return Ok((s, blob));
-    }
-    let replace = st.totp_secret_enc.is_some();
-    let fresh = totp::generate_secret().map_err(|_| internal())?;
-    let sealed = totp::seal(key, uid, &*fresh).map_err(|_| internal())?;
-    let stored = match auth.db().store_pending_totp(uid, &sealed, replace).await {
+    let uid = sess.user_id;
+    let (sealed, replace) = if secret_of_state(auth, uid, st).is_some() {
+        (st.totp_secret_enc.clone().ok_or_else(internal)?, false)
+    } else {
+        let fresh = totp::generate_secret().map_err(|_| internal())?;
+        (
+            totp::seal(key, uid, &*fresh).map_err(|_| internal())?,
+            st.totp_secret_enc.is_some(),
+        )
+    };
+    // Reading an existing secret needs the same session check as creating one: the request
+    // may have waited for its body or another database operation after admission.
+    let stored = match auth
+        .db()
+        .store_pending_totp_for_session(
+            uid,
+            &sess.id_hash,
+            &sealed,
+            replace,
+            token_hash,
+            auth.now(),
+        )
+        .await
+    {
         Ok(Some(b)) => b,
-        Ok(None) => return Err(see_other("/login/mfa", None)),
+        Ok(None) => return Err(see_other("/login", Some(auth.clear_cookie()))),
         Err(e) => {
             tracing::error!(error = %e, "could not store pending TOTP secret");
             return Err(internal());
@@ -346,6 +927,20 @@ impl Mode {
 /// Decides which kind of enrollment this pending session is, or where it belongs instead.
 #[allow(clippy::result_large_err)]
 async fn enroll_mode(auth: &AuthState, sess: &SessionCtx) -> Result<Mode, Response> {
+    let pending = match auth.db().get_session(&sess.id_hash).await {
+        Ok(Some(row))
+            if row.user_id == sess.user_id
+                && row.stage == SessionStage::PendingMfa
+                && row.expires_at > auth.now() =>
+        {
+            row
+        }
+        Ok(_) => return Err(see_other("/login", Some(auth.clear_cookie()))),
+        Err(e) => {
+            tracing::error!(error = %e, "enrollment session lookup failed");
+            return Err(internal());
+        }
+    };
     let st = match auth.db().get_mfa_state(sess.user_id).await {
         Ok(Some(st)) => st,
         Ok(None) => return Err(see_other("/login", None)),
@@ -369,7 +964,7 @@ async fn enroll_mode(auth: &AuthState, sess: &SessionCtx) -> Result<Mode, Respon
     if st.totp_enabled {
         return Err(see_other("/login/mfa", None));
     }
-    if sess.enroll_proven {
+    if pending.enroll_proven {
         Ok(Mode::Proven(st))
     } else {
         Ok(Mode::Token(st))
@@ -428,7 +1023,8 @@ async fn show_secret(auth: &AuthState, sess: &SessionCtx, mode: &Mode, token: &s
         tracing::error!("no TOTP key configured; enrollment unavailable");
         return internal();
     };
-    match pending_for(auth, key, sess, mode).await {
+    let token_hash = matches!(mode, Mode::Token(_)).then(|| totp::enroll_token_hash(token));
+    match pending_for(auth, key, sess, mode, token_hash).await {
         Ok((secret, _)) => render_enroll(sess, mode, &secret, token, None),
         Err(r) => r,
     }
@@ -442,17 +1038,20 @@ async fn pending_for(
     key: &totp::TotpKey,
     sess: &SessionCtx,
     mode: &Mode,
+    token_hash: Option<[u8; 32]>,
 ) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>), Response> {
     match mode {
-        Mode::Token(st) | Mode::Proven(st) => pending_secret(auth, key, sess.user_id, st).await,
+        Mode::Token(st) | Mode::Proven(st) => pending_secret(auth, key, sess, st, token_hash).await,
         Mode::Recovery(_, staged) => {
-            if let Some(blob) = staged.totp_secret_enc.clone()
+            let sealed = if let Some(blob) = staged.totp_secret_enc.clone()
                 && let Some(secret) = totp::open(key, sess.user_id, &blob)
             {
-                return Ok((secret, blob));
-            }
-            let fresh = totp::generate_secret().map_err(|_| internal())?;
-            let sealed = totp::seal(key, sess.user_id, &*fresh).map_err(|_| internal())?;
+                drop(secret);
+                blob
+            } else {
+                let fresh = totp::generate_secret().map_err(|_| internal())?;
+                totp::seal(key, sess.user_id, &*fresh).map_err(|_| internal())?
+            };
             let stored = match auth
                 .db()
                 .stage_totp_secret(sess.user_id, &sess.id_hash, &sealed, auth.now())
@@ -501,14 +1100,7 @@ async fn enroll_reveal(
     let (true, Some(canon)) = (ok, canon) else {
         return render_token_prompt(sess, Some(INVALID_TOKEN));
     };
-    let Some(key) = auth.totp_key() else {
-        tracing::error!("no TOTP key configured; enrollment unavailable");
-        return internal();
-    };
-    match pending_for(auth, key, sess, mode).await {
-        Ok((secret, _)) => render_enroll(sess, mode, &secret, &canon, None),
-        Err(r) => r,
-    }
+    show_secret(auth, sess, mode, &canon).await
 }
 
 // One handler for the three modes of the enrollment POST; splitting it would only scatter the
@@ -581,7 +1173,7 @@ pub(crate) async fn post_enroll(
             return render_token_prompt(&sess, Some(INVALID_TOKEN));
         }
     }
-    let (secret, blob) = match pending_for(&auth, key, &sess, &mode).await {
+    let (secret, blob) = match pending_for(&auth, key, &sess, &mode, token_hash).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -628,7 +1220,7 @@ pub(crate) async fn post_enroll(
         };
         return match auth
             .db()
-            .commit_staged_recovery(&commit, Some(&ip_text), now)
+            .commit_staged_recovery(&commit, Some(&ip_text), auth.now())
             .await
         {
             Ok(()) => recovery_response(
@@ -660,7 +1252,7 @@ pub(crate) async fn post_enroll(
     };
     let enrolled = match auth
         .db()
-        .confirm_totp_enrollment_v2(&confirm, &attempt.ctx(), Some(&ip_text), now)
+        .confirm_totp_enrollment_v2(&confirm, &attempt.ctx(), Some(&ip_text), auth.now())
         .await
     {
         Ok(v) => v,

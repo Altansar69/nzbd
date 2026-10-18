@@ -913,22 +913,23 @@ impl SqliteDb {
         .bind(c.user_id)
         .fetch_optional(&mut *tx)
         .await?;
+        let proven = if let Some(hash) = ctx.session {
+            let live: Option<i64> = sqlx::query_scalar(
+                "SELECT enroll_proven FROM session WHERE id_hash = ?1 AND account_id = ?2 \
+                     AND stage = 'pending_mfa' AND expires_at > ?3",
+            )
+            .bind(hash.as_slice())
+            .bind(c.user_id)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(proven) = live else { return Ok(false) };
+            proven != 0
+        } else {
+            false
+        };
         let g = gate(&mut tx, c.user_id, ctx, now).await?;
         let refused = g.aggregate_refused || g.daily_refused;
-        let proven = match ctx.session {
-            Some(s) => {
-                let n: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM session WHERE id_hash = ?1 AND account_id = ?2 \
-                     AND stage = 'pending_mfa' AND enroll_proven = 1",
-                )
-                .bind(s.as_slice())
-                .bind(c.user_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                n > 0
-            }
-            None => false,
-        };
         let exists = row.is_some();
         let mut pending = false;
         let mut who: Option<AuditActor> = None;

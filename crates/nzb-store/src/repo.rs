@@ -234,6 +234,14 @@ repo! {
             filters: &str,
             now: i64,
         ) -> Result<i64, StoreError>;
+        /// Session-bound write: active, unexpired, owner-matching session rechecked inside the transaction.
+        fn create_saved_search_as(
+            &self,
+            actor: &AccountActor,
+            name: &str,
+            filters: &str,
+            now: i64,
+        ) -> Result<i64, StoreError>;
         /// Tombstones a DISABLED uploader/viewer (admin session, re-authenticated by the caller).
         fn delete_account(
             &self,
@@ -246,6 +254,8 @@ repo! {
         fn delete_account_operator(&self, target_id: i64, now: i64) -> Result<(), StoreError>;
         /// Deletes one of the caller's own saved searches (T127); anybody else's id is `NotFound`, like an unknown one.
         fn delete_saved_search(&self, account_id: i64, id: i64) -> Result<(), StoreError>;
+        /// Session-bound write: active, unexpired, owner-matching session rechecked inside the transaction.
+        fn delete_saved_search_as(&self, actor: &AccountActor, id: i64, now: i64) -> Result<(), StoreError>;
         /// Revokes one session.
         fn delete_session(&self, id_hash: &[u8; 32]) -> Result<bool, StoreError>;
         /// Disables a uploader/viewer (admin session).
@@ -340,6 +350,13 @@ repo! {
             id: i64,
             now: i64,
         ) -> Result<Option<SavedSearch>, StoreError>;
+        /// Session-bound write: active, unexpired, owner-matching session rechecked inside the transaction.
+        fn open_saved_search_as(
+            &self,
+            actor: &AccountActor,
+            id: i64,
+            now: i64,
+        ) -> Result<Option<SavedSearch>, StoreError>;
         /// The login name an OPEN code would apply to (the reserved name of an invitation, the target's
         /// login name of a recovery code), or `None` for any other code.
         fn open_code_login_name(
@@ -388,6 +405,8 @@ repo! {
         /// Renames one of the caller's own saved searches (T127); anybody else's id is `NotFound`, a name the
         /// account already uses is `SavedSearch(Duplicate)`.
         fn rename_saved_search(&self, account_id: i64, id: i64, name: &str) -> Result<(), StoreError>;
+        /// Session-bound write: active, unexpired, owner-matching session rechecked inside the transaction.
+        fn rename_saved_search_as(&self, actor: &AccountActor, id: i64, name: &str, now: i64) -> Result<(), StoreError>;
         /// Replaces all recovery codes (old ones, used or not, stop working); `NotFound` when
         /// `session_hash`, the session that re-authenticated, is gone.
         fn replace_recovery_codes(
@@ -564,10 +583,26 @@ repo! {
             ip: Option<&str>,
             now: i64,
         ) -> Result<bool, StoreError>;
+        /// Session-bound write: active, unexpired, owner-matching session rechecked inside the transaction.
+        fn patch_user_prefs_as(
+            &self,
+            actor: &AccountActor,
+            patch: PrefsPatch,
+            ip: Option<&str>,
+            now: i64,
+        ) -> Result<bool, StoreError>;
         /// Stores one page size of the caller's own preferences, writing only that column (T133).
         fn set_page_size(
             &self,
             actor_id: i64,
+            size: PageSize,
+            ip: Option<&str>,
+            now: i64,
+        ) -> Result<bool, StoreError>;
+        /// Session-bound write: active, unexpired, owner-matching session rechecked inside the transaction.
+        fn set_page_size_as(
+            &self,
+            actor: &AccountActor,
             size: PageSize,
             ip: Option<&str>,
             now: i64,
@@ -596,6 +631,17 @@ repo! {
             sealed: &[u8],
             replace: bool,
         ) -> Result<Option<Vec<u8>>, StoreError>;
+        /// Reads or creates a secret only for a live pending session with its current token or enrollment proof.
+        fn store_pending_totp_for_session(
+            &self,
+            user_id: i64,
+            session_hash: &[u8; 32],
+            sealed: &[u8],
+            replace: bool,
+            token_hash: Option<[u8; 32]>,
+            now: i64,
+        ) -> Result<Option<Vec<u8>>, StoreError>;
+
         /// The throttle state of `(user_id, ip_key)` as of `now` (read-only; for UI decisions and
         /// health).
         fn throttle_state(

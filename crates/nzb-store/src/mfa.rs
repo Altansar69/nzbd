@@ -12,6 +12,13 @@ use sqlx::Row;
 use crate::auth::bump_failure;
 use crate::{NewSession, SessionStage, SqliteDb, StoreError};
 
+/// Session and proof re-read together before an enrollment secret is accessed.
+pub(crate) struct PendingEnrollment<'a> {
+    pub(crate) session_hash: &'a [u8; 32],
+    pub(crate) token_hash: Option<[u8; 32]>,
+    pub(crate) now: i64,
+}
+
 /// Stored MFA state of a user (the sealed secret is opaque here).
 #[derive(Clone, PartialEq, Eq)]
 pub struct MfaState {
@@ -163,6 +170,60 @@ async fn require_revoking_session(
     live.map(|_| ()).ok_or(StoreError::NotFound)
 }
 
+/// Revalidates the pending session before an enrollment secret or staged recovery write.
+pub(crate) async fn pending_session_is_live(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: i64,
+    hash: &[u8; 32],
+    now: i64,
+) -> Result<bool, StoreError> {
+    let live: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM session s JOIN account a ON a.id = s.account_id \
+         WHERE s.id_hash = ?1 AND s.account_id = ?2 AND s.stage = 'pending_mfa' \
+         AND s.expires_at > ?3 AND a.disabled_at IS NULL AND a.deleted_at IS NULL",
+    )
+    .bind(hash.as_slice())
+    .bind(user_id)
+    .bind(now)
+    .fetch_optional(conn)
+    .await?;
+    Ok(live.is_some())
+}
+
+/// The session and the out-of-band enrollment proof authorize one secret read/write together.
+/// Both rows stay fixed until commit (SQLite writer / Postgres account and session locks).
+async fn pending_secret_authorized(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: i64,
+    session_hash: &[u8; 32],
+    token_hash: Option<&[u8; 32]>,
+    now: i64,
+) -> Result<bool, StoreError> {
+    if !pending_session_is_live(conn, user_id, session_hash, now).await? {
+        return Ok(false);
+    }
+    let row = sqlx::query(
+        "SELECT s.enroll_proven, a.enroll_token_hash, a.enroll_token_expires \
+         FROM session s JOIN account a ON a.id = s.account_id \
+         WHERE s.id_hash = ?1 AND s.account_id = ?2",
+    )
+    .bind(session_hash.as_slice())
+    .bind(user_id)
+    .fetch_optional(conn)
+    .await?;
+    let Some(r) = row else { return Ok(false) };
+    if r.try_get::<i64, _>("enroll_proven")? != 0 {
+        return Ok(true);
+    }
+    let stored: Option<Vec<u8>> = r.try_get("enroll_token_hash")?;
+    let expires: Option<i64> = r.try_get("enroll_token_expires")?;
+    Ok(expires.is_some_and(|e| e > now)
+        && match (stored.as_deref(), token_hash) {
+            (Some(stored), Some(supplied)) => ct_eq32(stored, supplied),
+            _ => false,
+        })
+}
+
 impl SqliteDb {
     /// Arms enrollment: stores `SHA-256(token)` and its expiry for the only user, replacing any
     /// earlier token. Returns `false` when TOTP is already enabled (nothing to enroll) and
@@ -298,7 +359,59 @@ impl SqliteDb {
         sealed: &[u8],
         replace: bool,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store_pending_totp_inner(user_id, sealed, replace, None)
+            .await
+    }
+
+    /// Stores or reads an enrollment secret only for its live pending browser session.
+    /// The current unexpired enrollment token must match, or the stored session must be `enroll_proven`.
+    /// Revocation, expiry, an active session, a disabled/deleted owner or a missing proof returns `None`.
+    /// The same checks apply to reading an existing secret, so rotating a token invalidates an earlier proof.
+    ///
+    /// # Errors
+    /// Database failure.
+    pub async fn store_pending_totp_for_session(
+        &self,
+        user_id: i64,
+        session_hash: &[u8; 32],
+        sealed: &[u8],
+        replace: bool,
+        token_hash: Option<[u8; 32]>,
+        now: i64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.store_pending_totp_inner(
+            user_id,
+            sealed,
+            replace,
+            Some(PendingEnrollment {
+                session_hash,
+                token_hash,
+                now,
+            }),
+        )
+        .await
+    }
+
+    async fn store_pending_totp_inner(
+        &self,
+        user_id: i64,
+        sealed: &[u8],
+        replace: bool,
+        session: Option<PendingEnrollment<'_>>,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let mut tx = self.begin_immediate().await?;
+        if let Some(access) = session
+            && !pending_secret_authorized(
+                &mut tx,
+                user_id,
+                access.session_hash,
+                access.token_hash.as_ref(),
+                access.now,
+            )
+            .await?
+        {
+            return Ok(None);
+        }
         sqlx::query(
             "UPDATE account SET totp_secret_enc = ?2 \
              WHERE id = ?1 AND totp_enabled = 0 AND (totp_secret_enc IS NULL OR ?3 = 1)",

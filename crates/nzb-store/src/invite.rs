@@ -751,6 +751,9 @@ impl SqliteDb {
         now: i64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         let mut tx = self.begin_immediate().await?;
+        if !crate::mfa::pending_session_is_live(&mut tx, user_id, session_hash, now).await? {
+            return Ok(None);
+        }
         sqlx::query(
             "UPDATE credential_staging SET totp_secret_enc = ?3 \
              WHERE account_id = ?1 AND session_hash = ?2 AND expires_at > ?4 AND totp_secret_enc IS NULL",
@@ -792,6 +795,9 @@ impl SqliteDb {
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.begin_immediate().await?;
+        if !crate::mfa::pending_session_is_live(&mut tx, c.user_id, c.session_hash, now).await? {
+            return Err(AccountError::StagingInvalid.into());
+        }
         let staged = sqlx::query(
             "SELECT invite_id, issued_by, password_hash, totp_secret_enc FROM credential_staging \
              WHERE account_id = ?1 AND session_hash = ?2 AND expires_at > ?3",
