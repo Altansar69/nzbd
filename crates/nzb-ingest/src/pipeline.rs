@@ -512,6 +512,9 @@ struct Ctx {
     ident: Option<fsops::SourceIdent>,
     /// Test-only: an injected crash happened; skip failure handling (a dead process does none).
     crashed: bool,
+    /// The parser panicked: counted like a panicking job, so the file is quarantined after
+    /// [`MAX_PANICS`] instead of being retried forever.
+    panicked: bool,
 }
 
 impl Pipeline {
@@ -867,6 +870,9 @@ impl Pipeline {
             job.discard();
             return e;
         }
+        if ctx.panicked {
+            return self.fail_panicked(&job.meta()).await;
+        }
         if !ctx.crashed {
             self.fail(&job.meta(), ctx.sha, ctx.ident.take(), &e, 0)
                 .await;
@@ -1029,7 +1035,12 @@ impl Pipeline {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if g.len() > MAX_TRACKED_PATHS {
-            g.clear();
+            // Retry-only entries go first, so a flood of failing files cannot reset the panic
+            // count that quarantines a panicking one.
+            g.retain(|_, a| a.panics > 0);
+            if g.len() > MAX_TRACKED_PATHS {
+                g.clear();
+            }
         }
         f(&mut g)
     }
@@ -1230,7 +1241,10 @@ impl Pipeline {
             (bytes, r)
         })
         .await
-        .map_err(|_| IngestError::Internal)?;
+        .map_err(|e| {
+            ctx.panicked = e.is_panic();
+            IngestError::Internal
+        })?;
         loaded.bytes = bytes;
         let mut analysis = analysed?;
         if analysis.sha256 != sha {

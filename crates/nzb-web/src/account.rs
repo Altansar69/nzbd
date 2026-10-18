@@ -13,7 +13,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use nzb_store::prelude::*;
-use nzb_store::{FactorAttempt, SecondFactor, SessionInfo, SessionStage, Theme, UserPrefs};
+use nzb_store::{
+    FactorAttempt, SecondFactor, SessionInfo, SessionStage, StoreError, Theme, UserPrefs,
+};
 
 use crate::account_keys::{self, KeyView};
 use crate::assets::Layout;
@@ -409,24 +411,35 @@ async fn post_password(
             return internal();
         }
     };
-    if let Err(e) = auth
-        .db()
-        .change_password(sess.user_id, &hash, Some(&ip_text), auth.now())
-        .await
-    {
-        tracing::error!(error = %e, "password change failed");
-        return internal();
-    }
-    // Every session (including this one) was revoked; the caller continues on a fresh id.
+    // Every session (including this one) is revoked; the caller continues on a fresh id, inserted
+    // in the same transaction, which refuses if this session died meanwhile (a recovery, reset or
+    // revocation must not be undone by a change that was already re-authenticated).
     let meta = ClientMeta::from_request(&headers, Some(ip));
+    let (new_session, cookie, _) =
+        match auth.prepare_session(sess.user_id, SessionStage::Active, &meta) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "session preparation failed");
+                return internal();
+            }
+        };
     match auth
-        .start_session(sess.user_id, SessionStage::Active, &meta, None)
+        .db()
+        .change_password(
+            sess.user_id,
+            &sess.id_hash,
+            &hash,
+            &new_session,
+            Some(&ip_text),
+            auth.now(),
+        )
         .await
     {
-        Ok(cookie) => see_other("/account", Some(cookie)),
+        Ok(()) => see_other("/account", Some(cookie)),
+        Err(StoreError::NotFound) => see_other("/login", Some(auth.clear_cookie())),
         Err(e) => {
-            tracing::error!(error = %e, "session creation failed");
-            see_other("/login", Some(auth.clear_cookie()))
+            tracing::error!(error = %e, "password change failed");
+            internal()
         }
     }
 }
@@ -448,13 +461,23 @@ async fn post_recovery(
         return internal();
     };
     let hashes: Vec<[u8; 32]> = codes.iter().map(|c| totp::recovery_hash(c)).collect();
-    if let Err(e) = auth
+    match auth
         .db()
-        .replace_recovery_codes(sess.user_id, &hashes, Some(&ip_text), auth.now())
+        .replace_recovery_codes(
+            sess.user_id,
+            &sess.id_hash,
+            &hashes,
+            Some(&ip_text),
+            auth.now(),
+        )
         .await
     {
-        tracing::error!(error = %e, "recovery code replacement failed");
-        return internal();
+        Ok(()) => {}
+        Err(StoreError::NotFound) => return see_other("/login", Some(auth.clear_cookie())),
+        Err(e) => {
+            tracing::error!(error = %e, "recovery code replacement failed");
+            return internal();
+        }
     }
     recovery_response(
         Layout::for_session("Recovery codes", &sess),

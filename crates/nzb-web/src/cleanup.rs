@@ -678,6 +678,7 @@ async fn get_purge(
     purge_page(&st, &sess, bucket, None).await
 }
 
+#[allow(clippy::too_many_lines)] // one confirmed, re-authenticated action; the steps are its contract
 async fn post_purge(
     State(st): State<St>,
     Extension(sess): Extension<SessionCtx>,
@@ -689,6 +690,9 @@ async fn post_purge(
         return not_found();
     };
     let form = csrf::parse_form(&body);
+    if !csrf::singletons_ok(&form, DELETE_SINGLETONS) {
+        return ApiError::new(StatusCode::BAD_REQUEST, "BAD_REQUEST").into_response();
+    }
     // Input-only checks first: they must not burn the user's TOTP step.
     if csrf::form_get(&form, "confirm").map(str::trim) != Some(bucket.slug()) {
         return purge_page(

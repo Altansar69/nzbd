@@ -972,9 +972,19 @@ async fn sec_063_commit_requires_matching_session_and_unexpired_staging() {
     e.db.stage_totp_secret(m, &[50; 32], &sealed, T0 + 2)
         .await
         .unwrap();
-    e.db.change_password(m, "owner-new", None, T0 + 3)
+    e.db.insert_session(&sess(m, 70, SessionStage::Active, T0), 5)
         .await
         .unwrap();
+    e.db.change_password(
+        m,
+        &[70; 32],
+        "owner-new",
+        &sess(0, 71, SessionStage::Active, T0 + 3),
+        None,
+        T0 + 3,
+    )
+    .await
+    .unwrap();
     let c = CommitRecovery {
         user_id: m,
         session_hash: &[50; 32],
@@ -1024,9 +1034,19 @@ async fn sec_063_owner_password_change_deletes_staged_swap() {
     recover(&e, &act, m, 5, T0).await;
     redeem(&e, 5, 50, T0 + 1).await.unwrap();
     assert_eq!(e.count("credential_staging", "1=1").await, 1);
-    e.db.change_password(m, "owner-new", None, T0 + 2)
+    e.db.insert_session(&sess(m, 70, SessionStage::Active, T0), 5)
         .await
         .unwrap();
+    e.db.change_password(
+        m,
+        &[70; 32],
+        "owner-new",
+        &sess(0, 71, SessionStage::Active, T0 + 2),
+        None,
+        T0 + 2,
+    )
+    .await
+    .unwrap();
     assert_eq!(e.count("credential_staging", "1=1").await, 0);
     // The same goes for every CLI credential command.
     for step in 0..3_u8 {
@@ -1335,4 +1355,45 @@ async fn sec_061_registration_disabled_store_refuses_invites_and_keeps_recovery(
             .await
             .unwrap();
     assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn password_change_is_bound_to_the_reauthenticated_session() {
+    let (e, _a, m, _act) = world().await;
+    let before = password_of(&e, m).await;
+    // The session that re-authenticated is gone (a recovery, reset or revocation committed
+    // meanwhile): nothing is written and no session is minted.
+    let r =
+        e.db.change_password(
+            m,
+            &[70; 32],
+            "late",
+            &sess(0, 71, SessionStage::Active, T0),
+            None,
+            T0,
+        )
+        .await;
+    assert!(matches!(r, Err(StoreError::NotFound)));
+    assert_eq!(password_of(&e, m).await, before);
+    assert!(e.db.get_session(&[71; 32]).await.unwrap().is_none());
+    // With it, the change applies and the caller continues on the new session only.
+    for n in [70, 72] {
+        e.db.insert_session(&sess(m, n, SessionStage::Active, T0), 5)
+            .await
+            .unwrap();
+    }
+    e.db.change_password(
+        m,
+        &[70; 32],
+        "owner-new",
+        &sess(0, 71, SessionStage::Active, T0),
+        None,
+        T0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(password_of(&e, m).await, "owner-new");
+    assert!(e.db.get_session(&[70; 32]).await.unwrap().is_none());
+    assert!(e.db.get_session(&[72; 32]).await.unwrap().is_none());
+    assert!(e.db.get_session(&[71; 32]).await.unwrap().is_some());
 }

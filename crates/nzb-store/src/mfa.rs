@@ -10,7 +10,7 @@
 use sqlx::Row;
 
 use crate::auth::bump_failure;
-use crate::{SqliteDb, StoreError};
+use crate::{NewSession, SessionStage, SqliteDb, StoreError};
 
 /// Stored MFA state of a user (the sealed secret is opaque here).
 #[derive(Clone, PartialEq, Eq)]
@@ -487,18 +487,32 @@ impl SqliteDb {
         Ok(accepted)
     }
 
-    /// Replaces all recovery codes (old ones, used or not, stop working). Audit-logged.
+    /// Replaces all recovery codes (old ones, used or not, stop working). Audit-logged. Bound to
+    /// the session that re-authenticated, like [`SqliteDb::change_password`].
     ///
     /// # Errors
-    /// Database failure.
+    /// [`StoreError::NotFound`] if the session is gone; database failure.
     pub async fn replace_recovery_codes(
         &self,
         user_id: i64,
+        session_hash: &[u8; 32],
         hashes: &[[u8; 32]],
         ip: Option<&str>,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.writer().begin().await?;
+        let live: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM session WHERE id_hash = ?1 AND account_id = ?2 AND stage = 'active' \
+             AND expires_at > ?3",
+        )
+        .bind(session_hash.as_slice())
+        .bind(user_id)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if live.is_none() {
+            return Err(StoreError::NotFound);
+        }
         sqlx::query("DELETE FROM recovery_code WHERE account_id = ?1")
             .bind(user_id)
             .execute(&mut *tx)
@@ -537,20 +551,36 @@ impl SqliteDb {
         .await?)
     }
 
-    /// Replaces the password hash after an authenticated, re-verified change and revokes EVERY
-    /// session of the user (the caller then mints a fresh one: rotation at password change).
+    /// Replaces the password hash after an authenticated, re-verified change, revokes EVERY
+    /// session of the user and inserts `new_session` in its place (rotation at password change).
     /// API keys are kept (the owner is present and authenticated). Audit-logged.
     ///
+    /// The change is bound to the session that re-authenticated: if `session_hash` is gone (a
+    /// recovery, reset or revocation committed meanwhile), nothing is written, so a concurrent
+    /// change cannot undo it.
+    ///
     /// # Errors
-    /// [`StoreError::NotFound`] if the user vanished.
+    /// [`StoreError::NotFound`] if the user or the session vanished.
     pub async fn change_password(
         &self,
         user_id: i64,
+        session_hash: &[u8; 32],
         password_hash: &str,
+        new_session: &NewSession,
         ip: Option<&str>,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.writer().begin().await?;
+        let own = sqlx::query(
+            "DELETE FROM session WHERE id_hash = ?1 AND account_id = ?2 AND stage = 'active'",
+        )
+        .bind(session_hash.as_slice())
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        if own.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
         let res = sqlx::query(
             "UPDATE account SET password_hash = ?2, password_changed_at = ?3 WHERE id = ?1",
         )
@@ -562,11 +592,16 @@ impl SqliteDb {
         if res.rows_affected() == 0 {
             return Err(StoreError::NotFound);
         }
-        let revoked = sqlx::query("DELETE FROM session WHERE account_id = ?1")
+        let others = sqlx::query("DELETE FROM session WHERE account_id = ?1")
             .bind(user_id)
             .execute(&mut *tx)
             .await?
             .rows_affected();
+        let revoked = others.saturating_add(1);
+        let mut s = new_session.clone();
+        s.user_id = user_id;
+        s.stage = SessionStage::Active;
+        crate::auth::insert_in_tx(&mut tx, &s, 5, false).await?;
         let detail = format!("sessions_revoked={revoked}");
         let actor = username_of(&mut tx, user_id).await?;
         audit_tx(

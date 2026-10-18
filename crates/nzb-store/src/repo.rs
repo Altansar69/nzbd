@@ -120,12 +120,15 @@ repo! {
             ip: Option<&str>,
             now: i64,
         ) -> Result<(), StoreError>;
-        /// Replaces the password hash after an authenticated, re-verified change and revokes EVERY
-        /// session of the user (the caller then mints a fresh one).
+        /// Replaces the password hash after an authenticated, re-verified change, revokes EVERY
+        /// session of the user and inserts `new_session`; `NotFound` (nothing written) when
+        /// `session_hash`, the session that re-authenticated, is gone.
         fn change_password(
             &self,
             user_id: i64,
+            session_hash: &[u8; 32],
             password_hash: &str,
+            new_session: &NewSession,
             ip: Option<&str>,
             now: i64,
         ) -> Result<(), StoreError>;
@@ -373,10 +376,12 @@ repo! {
         /// Renames one of the caller's own saved searches (T127); anybody else's id is `NotFound`, a name the
         /// account already uses is `SavedSearch(Duplicate)`.
         fn rename_saved_search(&self, account_id: i64, id: i64, name: &str) -> Result<(), StoreError>;
-        /// Replaces all recovery codes (old ones, used or not, stop working).
+        /// Replaces all recovery codes (old ones, used or not, stop working); `NotFound` when
+        /// `session_hash`, the session that re-authenticated, is gone.
         fn replace_recovery_codes(
             &self,
             user_id: i64,
+            session_hash: &[u8; 32],
             hashes: &[[u8; 32]],
             ip: Option<&str>,
             now: i64,
