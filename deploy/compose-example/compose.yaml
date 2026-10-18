@@ -39,6 +39,9 @@ services:
       # Every nzbd command in the container (serve and `docker compose exec nzbd /nzbd ...`) reads this file;
       # the NZBD__* variables above are set by install.sh and override the same keys in the file.
       NZBD_CONFIG_FILE: /etc/nzbd/config.toml
+      # Readable coloured single-line logs and a startup banner in `docker compose logs` (owner decision: the default for
+      # the stack). `json` (one object per event) for log shippers: NZBD_LOG_FORMAT=json in .env. NO_COLOR=1 drops colour.
+      NZBD_LOG_FORMAT: "${NZBD_LOG_FORMAT:-pretty}"
       # serve.lock and the restore anchor (db-anchor.json) live on their own volume, NOT in the data directory: a
       # snapshot or tar of the data directory must not roll the anchor back together with the database, or restore
       # detection cannot fire (review 34 M3, docs/OPERATOR_SECURITY.md "Choosing a backend").

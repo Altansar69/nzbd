@@ -10,6 +10,8 @@
   PostgreSQL. With PostgreSQL the installer also asks for the database folder (default `<storage folder>/pg_data`).
   `docker compose down -v` and `docker volume prune` can no longer delete keys or data. The only named volume left is
   the PostgreSQL socket (`nzbd_pg_socket`).
+- **Readable logs by default.** The stack now runs nzbd with `NZBD_LOG_FORMAT=pretty` (coloured lines and a startup
+  banner in `docker compose logs`); set `NZBD_LOG_FORMAT=json` in `deploy/.env` for log shippers.
 - **Traefik first.** The installer lists running Traefik containers first and recommends them; for any other proxy it
   skips every Traefik question.
 - `install.sh` refuses to run with `compose-example/` or `volperms.sh` from another release.

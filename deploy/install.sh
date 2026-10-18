@@ -310,6 +310,7 @@ check_env() {
     v=$(get "$k"); case "$v" in *[!A-Za-z0-9._/-]*) bad_env "$k" "letters, digits, . _ - and / only" ;; esac
   done
   v=$(get NZBD_DB_BACKEND); case "$v" in '' | sqlite | postgres) ;; *) bad_env NZBD_DB_BACKEND "sqlite or postgres" ;; esac
+  v=$(get NZBD_LOG_FORMAT); case "$v" in '' | pretty | json) ;; *) bad_env NZBD_LOG_FORMAT "pretty or json" ;; esac
   # T128: the container user, when present (need_ids below requires it where a stack is rendered or deployed).
   for k in NZBD_UID NZBD_GID; do
     v=$(get "$k"); [ -z "$v" ] || valid_id "$v" || bad_env "$k" "one of $IDS_RULE"
@@ -356,7 +357,7 @@ render_compose() {
   env_ids
   env -u COMPOSE_FILE -u COMPOSE_PROFILES NZBD_IMAGE=nzbd:local NZBD_PROXY_IMAGE=nzbd-proxy:local \
     NZBD_UID="$NZBD_UID" NZBD_GID="$NZBD_GID" NZBD_NAME_PREFIX="$(name_prefix)" \
-    NZBD_DATA_DIR="$1" NZBD_VOLUMES_DIR="$(volumes_dir)" NZBD_PG_DATA_DIR="$(pg_data_dir)" NZBD_CONFIG="$2" docker compose --env-file "$ENVF" "${args[@]}" --profile setup config
+    NZBD_DATA_DIR="$1" NZBD_VOLUMES_DIR="$(volumes_dir)" NZBD_PG_DATA_DIR="$(pg_data_dir)" NZBD_LOG_FORMAT="$(get NZBD_LOG_FORMAT)" NZBD_CONFIG="$2" docker compose --env-file "$ENVF" "${args[@]}" --profile setup config
 }
 
 # emit_overlay: the compose overlay for an existing proxy on a shared network (choices 1 and 2), from NETNAME, APP_IP,
