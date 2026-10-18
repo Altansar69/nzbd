@@ -147,7 +147,9 @@ impl LagGate {
             return !was;
         };
         let now = if was {
-            depth >= self.pause_at / 2
+            // Round up: for a limit of one, an empty outbox must resume ingestion. For
+            // odd limits this also implements the documented strict "below half" boundary.
+            depth >= self.pause_at.div_ceil(2)
         } else {
             depth > self.pause_at
         };

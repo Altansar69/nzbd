@@ -514,23 +514,24 @@ fn run_with(
             }
             Event::End(_) => eng.close()?,
             Event::Text(t) => {
-                // Before the root only whitespace may stand between declarations (T083: stray
-                // prolog text used to be ignored, e.g. `<!DOCTYPE nzb> junk`).
+                // Outside the root only XML whitespace, comments and processing instructions
+                // are legal. Check the epilog too: trailing garbage must not be stored and
+                // served as a valid NZB just because its preceding root was well-formed.
                 let chunk: &str = &t;
-                if eng.in_prolog() && !chunk.chars().all(is_xml_space) {
-                    return Err(malformed("text before the root element"));
+                if eng.stack.is_empty() && !chunk.chars().all(is_xml_space) {
+                    return Err(malformed("text outside the root element"));
                 }
                 eng.text(chunk)?;
             }
             Event::CData(c) => {
-                if eng.in_prolog() {
-                    return Err(malformed("CDATA before the root element"));
+                if eng.stack.is_empty() {
+                    return Err(malformed("CDATA outside the root element"));
                 }
                 eng.text(&c)?;
             }
             Event::GeneralRef(r) => {
-                if eng.in_prolog() {
-                    return Err(malformed("reference before the root element"));
+                if eng.stack.is_empty() {
+                    return Err(malformed("reference outside the root element"));
                 }
                 let c = resolve_entity(&r)?;
                 let mut tmp = [0u8; 4];

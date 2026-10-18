@@ -434,7 +434,7 @@ repo! {
         /// Revokes one active key on behalf of a signed-in account (T103).
         fn revoke_api_key_by(
             &self,
-            actor_id: i64,
+            actor: &AccountActor,
             id: i64,
             ip: Option<&str>,
             now: i64,
@@ -465,7 +465,7 @@ repo! {
             now: i64,
             reason: &'static str,
         ) -> Result<u64, StoreError>;
-        /// Revokes every session of the user except `keep`.
+        /// Revokes every session of the user except the still-active calling session `keep`.
         fn revoke_other_sessions(
             &self,
             user_id: i64,
@@ -473,10 +473,11 @@ repo! {
             ip: Option<&str>,
             now: i64,
         ) -> Result<u64, StoreError>;
-        /// Revokes one session, but only if it belongs to `user_id`.
+        /// Revokes one session owned by `user_id`, while the calling session is still active.
         fn revoke_user_session(
             &self,
             user_id: i64,
+            session_hash: &[u8; 32],
             id_hash: &[u8; 32],
             ip: Option<&str>,
             now: i64,

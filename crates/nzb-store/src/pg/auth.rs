@@ -40,18 +40,21 @@ fn row_to_login(r: &sqlx::postgres::PgRow) -> Result<LoginUser, StoreError> {
 
 /// Inserts `s` and applies the per-user, per-stage cap. `enroll_proven` marks a pending session that
 /// already proved possession of an out-of-band invite/recovery code (0011).
-/// Whether `id_hash` is still an `active` session of `account_id` (see the SQLite twin). The row is locked
+/// Whether `id_hash` is still an unexpired `active` session of `account_id` (see the SQLite twin). The row is locked
 /// (`FOR SHARE`) so it cannot be deleted before the calling transaction ends.
 pub(crate) async fn session_is_live(
     conn: &mut sqlx::PgConnection,
     id_hash: &[u8; 32],
     account_id: i64,
+    now: i64,
 ) -> Result<bool, StoreError> {
     let live: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM session WHERE id_hash = $1 AND account_id = $2 AND stage = 'active'          FOR SHARE",
+        "SELECT 1 FROM session WHERE id_hash = $1 AND account_id = $2 \
+         AND stage = 'active' AND expires_at > $3 FOR SHARE",
     )
     .bind(id_hash.as_slice())
     .bind(account_id)
+    .bind(now)
     .fetch_optional(&mut *conn)
     .await?;
     Ok(live.is_some())
@@ -194,7 +197,7 @@ impl PgDb {
         .transpose()
     }
 
-    /// Slides the idle deadline of an `active` session.
+    /// Slides the idle deadline of an unexpired `active` session. A late touch never revives it.
     ///
     /// # Errors
     /// Database failure.
@@ -206,7 +209,7 @@ impl PgDb {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "UPDATE session SET last_seen_at = $2, expires_at = $3 \
-             WHERE id_hash = $1 AND stage = 'active'",
+             WHERE id_hash = $1 AND stage = 'active' AND expires_at > $2",
         )
         .bind(id_hash.as_slice())
         .bind(now)

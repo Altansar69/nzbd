@@ -251,7 +251,7 @@ async fn post_revoke(
     let ip_text = ip.to_string();
     match auth
         .db()
-        .revoke_api_key_by(sess.user_id, id, Some(&ip_text), auth.now())
+        .revoke_api_key_by(&sess.actor(), id, Some(&ip_text), auth.now())
         .await
     {
         Ok(true) => render_account(&auth, &sess, Some("API key revoked."), None).await,

@@ -556,7 +556,7 @@ async fn sec_067_audit_survives_account_deletion_unchanged() {
     // The uploader acts on its own key (an uploader edits no metadata since D40).
     let (key, _h) = e.key(m, 7).await;
     assert!(
-        e.db.revoke_api_key_by(m, key, Some("192.0.2.1"), T0)
+        e.db.revoke_api_key_by(&e.actor(m).await, key, Some("192.0.2.1"), T0)
             .await
             .unwrap()
     );

@@ -1,0 +1,64 @@
+# Backend-specific security tests. Every exception is checked against compiled test names.
+# These cover engine-specific mechanisms or shared filesystem/source checks, not missing shared contracts.
+# PostgreSQL snapshot exports and SQLite VACUUM files have separate format/restore APIs.
+backup_tests::sec_044_backup_restores_opens_and_queries sqlite Restores a VACUUM database file by copying and opening it; PostgreSQL exports are covered by pg_backup_tests::snapshot_round_trip_restores_everything_that_is_exported.
+backup_tests::sec_044_rotation_keeps_newest_and_only_deletes_generated_names sqlite Checks the SQLite generated-name grammar and matching directories; PostgreSQL has sec_044_backup_files_are_0600_and_rotated for its export suffix.
+pg_backup_tests::sec_044_backup_files_are_0600_and_rotated postgres Checks PostgreSQL export permissions and rotation; SQLite covers these in sec_044_backup_restores_opens_and_queries and sec_044_rotation_keeps_newest_and_only_deletes_generated_names.
+pg_backup_tests::sec_044_backup_is_one_snapshot_under_concurrent_writes postgres Verifies the multi-table REPEATABLE READ export sees one snapshot; SQLite backup is a single engine-level VACUUM INTO operation.
+pg_backup_tests::sec_094_backup_contains_no_role_passwords_or_key_files postgres PostgreSQL exports must omit server role credentials and key files; SQLite has no server login roles or exported role catalog.
+pg_backup_tests::sec_094_interrupted_restore_is_never_servable postgres Injects failures between PostgreSQL table imports after the separate restore-pending transaction; SQLite restore copies an already marked database file.
+pg_backup_tests::sec_094_encrypted_restore_recovers_the_actual_decryption_temporary_file postgres Resumes PostgreSQL restore after interrupted temporary decryption; SQLite decrypts explicitly before restoring the database file.
+pg_backup_tests::sec_094_plaintext_restore_needs_explicit_flag_when_a_key_is_configured postgres Tests RestoreOptions::allow_unencrypted for PostgreSQL restore_snapshot; SQLite has no import API and requires explicit backup decrypt followed by file copy.
+pg_backup_tests::sec_094_restore_requires_an_empty_schema_and_matching_version postgres PostgreSQL imports rows into an existing migrated schema and validates its migration ledger; SQLite restores a complete database file.
+pg_backup_tests::sec_094_tampered_backup_manifest_is_refused postgres Validates the PostgreSQL export table manifest, counts and checksums; SQLite VACUUM snapshots have no such manifest.
+
+# PostgreSQL has multiple writers, server roles, SECURITY DEFINER functions and server-side diagnostics.
+pg_release_tests::sec_095_concurrent_ingests_across_a_partition_boundary_do_not_deadlock postgres Exercises PostgreSQL partition DDL lock order and cross-process inserts across partition boundaries; SQLite tables are not partitioned.
+pg_sec_tests::sec_024_session_cap_holds_under_concurrent_logins_on_postgres postgres Exercises the PostgreSQL account-domain advisory lock across independent connections; SQLite serializes the same cap through its single writer.
+pg_sec_tests::sec_087_db_check_fails_on_excess_privileges postgres Grants forbidden table privileges and checks the PostgreSQL app-role self-test; SQLite has no database roles or GRANT.
+pg_sec_tests::sec_097_auth_table_errors_log_sqlstate_only postgres Checks PostgreSQL CHECK-violation DETAIL redaction to SQLSTATE; SQLite does not return the PostgreSQL diagnostic DETAIL fields.
+pg_sec_tests::sec_097_unique_violation_detail_never_reaches_the_client postgres Checks PostgreSQL unique-violation DETAIL containing a key hash is redacted; the SQLSTATE/DETAIL error protocol is PostgreSQL-specific.
+pg_sec_tests::sec_099_bulk_edit_is_atomic_under_concurrent_edits postgres Exercises PostgreSQL row-lock ordering across concurrent bulk writers with overlapping reversed IDs; SQLite bulk edits use its single writer.
+pg_sec_tests::sec_099_bulk_ids_are_bound_as_one_array postgres Checks PostgreSQL ANY(array) bindings and the bounded ID array; SQLite uses its separate JSON-array binding implementation.
+pg_tests::sec_042_db_secret_files_follow_the_key_file_rules postgres Validates the PostgreSQL database-password file reader; SQLite connects to a local file without a server password.
+pg_tests::sec_062_raw_sql_demotions_in_two_sessions_cannot_both_commit postgres Exercises the account trigger's PostgreSQL advisory lock with two concurrent write transactions; SQLite permits only one writer.
+pg_tests::sec_068_restore_mark_cannot_be_cleared_without_its_effects postgres Checks the app role cannot UPDATE db_state or call the removed mark-only function; PostgreSQL enforces this with SQL privileges and a definer function.
+pg_tests::sec_080_sql_hash_equals_rust_hash postgres Property-checks the PostgreSQL SQL audit-hash implementation against Rust; SQLite uses the Rust hash directly.
+pg_tests::sec_086_connect_options_ignore_pgpass_and_service_files postgres Checks PostgreSQL connection options bypass pgpass/service defaults and configure server sessions; SQLite has no libpq-style connection settings.
+pg_tests::sec_086_db_host_must_be_a_socket_path_or_ip_literal postgres Validates PostgreSQL network/socket endpoints; SQLite opens a filesystem path.
+pg_tests::sec_086_db_identifiers_are_validated postgres Validates PostgreSQL database and role identifiers plus pool settings; SQLite has no configured server/database-role names.
+pg_tests::sec_086_db_ip_literal_must_be_internal postgres Restricts PostgreSQL network destinations to internal IP literals; SQLite has no network connection.
+pg_tests::sec_086_pg_and_ssl_cert_environment_variables_are_refused postgres Rejects ambiguous PostgreSQL/libpq and SSL environment settings before connection; SQLite does not consume these settings.
+pg_tests::sec_087_app_role_cannot_delete_accounts_or_touch_audit_rows postgres Verifies PostgreSQL GRANT boundaries for the application role and owner; SQLite has no SQL role separation.
+pg_tests::sec_087_app_role_cannot_run_ddl postgres Verifies PostgreSQL app-role DDL and database privileges; SQLite has no server roles or schema GRANTs.
+pg_tests::sec_087_db_check_fails_on_role_membership_or_ownership postgres Checks PostgreSQL role membership and object ownership cannot bypass least privilege; SQLite has neither mechanism.
+pg_tests::sec_087_db_password_never_in_logs_or_errors postgres Tests PostgreSQL connection-authentication errors and password-holding handles; SQLite has no server authentication password.
+pg_tests::sec_087_serve_never_runs_migrations postgres PostgreSQL serve uses an unprivileged app role while setup migrates as owner; SQLite deliberately migrates its local file on open.
+pg_tests::sec_087_serve_refuses_a_readable_owner_secret postgres Tests separation of PostgreSQL owner and application credentials; SQLite has no owner credential.
+pg_tests::sec_088_definer_functions_are_not_executable_by_public postgres Inspects PostgreSQL function ACLs, owners and PUBLIC privileges; SQLite has no SECURITY DEFINER or database roles.
+pg_tests::sec_088_definer_functions_pin_search_path postgres Inspects PostgreSQL function proconfig to prevent search_path shadowing; SQLite has no PostgreSQL function search_path.
+pg_tests::sec_088_no_string_built_sql none One source lint scans production SQL calls for both SQLite and PostgreSQL; duplicating it under another module would repeat the same checks.
+pg_tests::sec_088_partition_function_clamps_its_argument postgres Prevents unbounded DDL through PostgreSQL ensure_file_partitions and sequence-derived bounds; SQLite has no partition function.
+pg_tests::sec_093_app_role_cannot_bypass_audit_append postgres Verifies PostgreSQL privileges force app-role writes through the SQL audit_append definer; SQLite computes its chain in Rust.
+pg_tests::sec_093_app_role_cannot_purge_inside_the_retention_window postgres Tests the PostgreSQL audit_purge definer exposes no caller cutoff and uses the server clock; SQLite retention floors have sqlite_v3_tests SEC-103 coverage.
+pg_tests::sec_093_app_role_cannot_rewrite_the_ingest_log postgres Verifies PostgreSQL app-role UPDATE/DELETE grants cannot bypass the owner retention functions; SQLite has no app-role grants.
+pg_tests::sec_093_appends_serialize_across_connections postgres Exercises the SQL audit_append class lock across concurrent PostgreSQL transactions and rollbacks; SQLite serializes Rust chain appends through its single writer.
+pg_tests::sec_093_purge_is_prefix_only postgres Tests the PostgreSQL SQL audit_purge implementation; SQLite Rust purge is covered by audit_chain_tests::sec_081_purge_removes_only_a_prefix_and_survivors_stay_protected.
+pg_tests::sec_093_retention_policy_is_owner_only_with_floors postgres Tests owner-only PostgreSQL GRANTs and policy CHECKs; SQLite floors are covered by sqlite_v3_tests::sec_103_retention_policy_floors_hold_on_sqlite.
+pg_tests::sec_095_statement_timeout_is_set_on_every_pool postgres Inspects server statement/lock/idle transaction timeouts for PostgreSQL pool classes; SQLite uses its progress-handler deadline test.
+release_tests::sec_095_commit_group_writer_hold_is_capped sqlite Bounds time holding SQLite's single writer and defers remaining group jobs; PostgreSQL writers run concurrently under statement_timeout.
+tests::sec_095_reader_statements_have_a_deadline sqlite Exercises SQLite progress-handler interruption and connection reuse; PostgreSQL deadlines are server-side statement_timeout settings.
+
+# The trash blob store is the same FsStore implementation for both database backends.
+trash_tests::sec_050_finish_keeps_a_blob_refreshed_by_a_racing_reingest none Tests FsStore timestamps and a racing reingest with a supplied reference predicate; no database is opened.
+trash_tests::sec_050_finish_keeps_the_live_blob_when_it_is_referenced_again none Tests FsStore finish with a reference predicate that changes to true; no backend-specific code runs.
+trash_tests::sec_050_finish_refuses_a_corrupt_trash_copy none Tests shared FsStore trash digest validation without a database.
+trash_tests::sec_050_finish_refuses_without_a_trash_copy_and_stage_needs_a_blob none Tests shared FsStore missing-file handling without a database.
+trash_tests::sec_050_stage_then_finish_moves_the_blob_and_keeps_it_readable none Tests shared FsStore stage/finish and readable blob bytes without a database.
+trash_tests::sec_051_purge_drops_a_trash_name_that_is_a_second_name_of_the_live_blob none Tests shared FsStore hard-link handling using filesystem metadata only.
+trash_tests::sec_051_purge_removes_only_plain_single_link_regular_files none Tests shared FsStore purge against symlinks, hard links and foreign filesystem entries; no database is opened.
+trash_tests::sec_051_quarantine_purge_honours_the_age_and_skips_foreign_entries none Tests shared filesystem quarantine age/name rules without a database.
+trash_tests::sec_051_quarantine_purge_refuses_hard_linked_files none Tests shared filesystem quarantine link-count validation without a database.
+trash_tests::sec_051_quarantine_purge_checks_authority_before_the_first_file none Tests shared FsStore quarantine refusal before any file deletion without a database.
+trash_tests::sec_051_quarantine_purge_stops_when_authority_is_revoked_between_batches none Tests the shared FsStore purge control callback and batch bound without a database.
+trash_tests::sec_051_trash_listing_ignores_foreign_names none Tests shared FsStore trash filename recognition without a database.

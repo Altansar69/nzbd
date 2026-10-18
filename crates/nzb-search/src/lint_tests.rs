@@ -56,7 +56,12 @@ fn sec_089_query_parser_and_regex_are_not_reachable() {
             rust_files(&src, &mut files);
         }
     }
-    rust_files(&root.join("fuzz").join("fuzz_targets"), &mut files);
+    // The production source bundle deliberately omits the separate fuzz project.
+    // Check it whenever present without making production-source tests unrunnable.
+    let fuzz_targets = root.join("fuzz").join("fuzz_targets");
+    if fuzz_targets.is_dir() {
+        rust_files(&fuzz_targets, &mut files);
+    }
     assert!(files.len() > 100, "{}", files.len());
     let needles = [
         "disallowed_types",

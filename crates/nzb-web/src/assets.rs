@@ -36,13 +36,13 @@ pub const ASSETS: &[Asset] = &[
         name: "app.css",
         mime: "text/css; charset=utf-8",
         bytes: include_bytes!("../../../static/app.css"),
-        sha256: "0145a7e6e04ca369e942a3fab98ad283d28d335e7066eb423774337bb1a13825",
+        sha256: "82f6b449ff0f7c3618d19f5921faa6f690e83d05f649b2a8c39ebec6d8af1237",
     },
     Asset {
         name: "app.js",
         mime: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../../../static/app.js"),
-        sha256: "9980b6990e86203ba1e996790885019584dc867ab167953a7645621b6114d825",
+        sha256: "9911cc2ab57df09fb96caae3f02270e9bcebfd646bd38bef9d68c7e773421de7",
     },
     Asset {
         name: "htmx.min.js",

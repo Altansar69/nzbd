@@ -186,6 +186,69 @@ fn second_root_is_malformed() {
 }
 
 #[test]
+fn content_outside_the_root_is_rejected_in_every_parse_mode() {
+    let root = format!("<nzb>{}</nzb>", file("s", &seg(1, 1)));
+    let limits = Limits::default();
+    for invalid in [
+        "junk",
+        "\u{a0}",
+        "<![CDATA[ ]]>",
+        "<![CDATA[]]>",
+        "&amp;",
+        "&#32;",
+    ] {
+        for input in [format!("{invalid}{root}"), format!("{root}{invalid}")] {
+            let bytes = input.as_bytes();
+            assert!(
+                matches!(
+                    parse(bytes, &limits, &Fake::at(0)),
+                    Err(NzbError::Malformed { .. })
+                ),
+                "full: {input}"
+            );
+            assert!(
+                matches!(
+                    list_segments(bytes, &limits, &Fake::at(0), 0, 0, 10),
+                    Err(NzbError::Malformed { .. })
+                ),
+                "segments: {input}"
+            );
+            assert!(
+                matches!(
+                    extract_files(bytes, &limits, &Fake::at(0), &[0]),
+                    Err(NzbError::Malformed { .. })
+                ),
+                "subset: {input}"
+            );
+        }
+    }
+}
+
+#[test]
+fn xml_whitespace_comments_and_instructions_outside_the_root_are_allowed() {
+    let input = format!(
+        " \t\r\n<!--before--><?before data?><nzb>{}</nzb> \t\r\n<!--after--><?after data?>",
+        file("s", &seg(1, 1))
+    );
+    let bytes = input.as_bytes();
+    let limits = Limits::default();
+    assert_eq!(parse(bytes, &limits, &Fake::at(0)).unwrap().files.len(), 1);
+    assert_eq!(
+        list_segments(bytes, &limits, &Fake::at(0), 0, 0, 10)
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(
+        extract_files(bytes, &limits, &Fake::at(0), &[0])
+            .unwrap()
+            .files
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn lowered_limits_trip_the_right_code() {
     let one = file("s", &seg(1, 10));
     let l = |f: fn(&mut Limits)| {

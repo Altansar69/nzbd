@@ -75,6 +75,7 @@ pub enum BackupCryptoError {
 }
 
 /// The 32-byte backup encryption key. Zeroized on drop, never printed.
+#[derive(Clone)]
 pub struct BackupKey([u8; 32]);
 
 impl BackupKey {

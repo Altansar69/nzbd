@@ -1036,7 +1036,7 @@ fn cli_without_a_database_fails_and_creates_nothing() {
 }
 
 #[test]
-fn cli_with_a_database_and_a_live_listener_reports_warnings_only() {
+fn cli_with_a_database_and_a_live_listener_reports_expected_build_diagnostics() {
     let t = tree();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let ts = rt.block_on(async {
@@ -1063,12 +1063,36 @@ fn cli_with_a_database_and_a_live_listener_reports_warnings_only() {
     use_leg_backend(&mut cfg, &ts, t.root.path());
     let (text, code) = cli_report(&cfg).unwrap();
     drop(ts);
-    // Debug build, no backup, MFA not enrolled: warnings. A small test volume may add a
-    // free-space failure, but nothing else may fail.
-    assert!(code >= 1, "{text}");
-    for l in text.lines().filter(|l| l.trim_start().starts_with("FAIL")) {
+    // Production builds report no development helpers; --all-features intentionally reports
+    // dev-tools as a security failure, including exit code 2. Neither diagnostic may disappear.
+    let build_rows: Vec<_> = text
+        .lines()
+        .filter(|l| l.contains("Build features"))
+        .collect();
+    assert_eq!(build_rows.len(), 1, "{text}");
+    let build_row = build_rows[0];
+    let expected = if cfg!(feature = "dev-tools") {
+        "FAIL Build features dev-tools compiled in"
+    } else {
+        "OK Build features no development tools"
+    };
+    assert_eq!(
+        build_row.split_whitespace().collect::<Vec<_>>().join(" "),
+        expected
+    );
+    // Debug build, no backup and MFA not enrolled yield warnings. A small test volume may
+    // additionally report low free space; every other unexpected failure must still fail the test.
+    let failures: Vec<_> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("FAIL"))
+        .collect();
+    for l in &failures {
+        if cfg!(feature = "dev-tools") && *l == build_row {
+            continue;
+        }
         assert!(l.contains("% free"), "{l}");
     }
+    assert_eq!(code, if failures.is_empty() { 1 } else { 2 }, "{text}");
     assert!(text.contains("WARN"));
 }
 

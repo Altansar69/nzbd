@@ -61,6 +61,118 @@ fn key() -> BackupKey {
 }
 
 #[tokio::test]
+async fn overlapping_snapshot_backups_preserve_the_active_file_and_cancel_cleanly() {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::time::Duration;
+
+    let e = env().await;
+    e.admin("root").await;
+    let dir = tempfile::tempdir().unwrap();
+    // Exhaust the pool so the actual backup stops at begin().await, with its directory
+    // lock and temporary file already owned. No large database or timing race is needed.
+    let mut held = Vec::new();
+    for _ in 0..e.db.background().options().get_max_connections() {
+        held.push(e.db.background().acquire().await.unwrap());
+    }
+    let db = e.db.clone();
+    let destination = dir.path().to_path_buf();
+    let running = tokio::spawn(async move { db.snapshot_backup(&destination, T0, 3, None).await });
+    let name = crate::pg::snapshot_name(T0);
+    let active = dir.path().join(format!(".{name}.tmp"));
+    let published = dir.path().join(&name);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !active.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = std::fs::metadata(&active).unwrap();
+    let err = tokio::time::timeout(
+        Duration::from_secs(2),
+        e.db.snapshot_backup(dir.path(), T0, 3, None),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(matches!(err, crate::StoreError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    assert_eq!(std::fs::metadata(&active).unwrap().ino(), before.ino());
+    assert!(!published.exists());
+
+    // Unlike SQLite's detached VACUUM worker, Postgres writes this file in the cancelled
+    // future itself: cancellation must release its lock and must not publish a partial file.
+    running.abort();
+    assert!(running.await.unwrap_err().is_cancelled());
+    assert!(!published.exists());
+    let probe = std::fs::File::open(dir.path()).unwrap();
+    probe.try_lock().unwrap();
+    drop(probe);
+    drop(held);
+
+    // The next real backup cleans the abandoned temporary file and remains restorable.
+    let rep = tokio::time::timeout(
+        Duration::from_secs(10),
+        e.db.snapshot_backup(dir.path(), T0, 3, None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rep.path, published);
+    assert!(!active.exists());
+    let target = TestDb::new().await;
+    let restored = restore_snapshot(
+        target.owner_options(),
+        &rep.path,
+        dir.path(),
+        RestoreOptions::default(),
+        T0 + 1,
+    )
+    .await
+    .unwrap();
+    assert!(restored.audit_chain_ok);
+    assert_eq!(restored.tables, rep.tables);
+    assert_eq!(n(&target.db, "SELECT count(*) FROM account").await, 1);
+}
+
+#[tokio::test]
+async fn sec_094_encrypted_restore_recovers_the_actual_decryption_temporary_file() {
+    let e = env().await;
+    e.admin("root").await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = key();
+    let rep =
+        e.db.snapshot_backup(dir.path(), T0, 3, Some(&key))
+            .await
+            .unwrap();
+    // decrypt_file prefixes the output name with a dot. The restore output itself starts
+    // with a dot, so a kill during decryption leaves this double-dot temporary name.
+    let stale = dir.path().join("..nzbd-restore.plain.tmp.decrypt.tmp");
+    std::fs::write(
+        &stale,
+        b"authenticated partial plaintext from an interrupted restore",
+    )
+    .unwrap();
+    let target = TestDb::new().await;
+    let restored = restore_snapshot(
+        target.owner_options(),
+        &rep.path,
+        dir.path(),
+        RestoreOptions {
+            key: Some(&key),
+            allow_unencrypted: false,
+        },
+        T0 + 1,
+    )
+    .await
+    .unwrap();
+    assert!(restored.audit_chain_ok);
+    assert_eq!(restored.tables, rep.tables);
+    assert_eq!(n(&target.db, "SELECT count(*) FROM account").await, 1);
+    assert!(!stale.exists());
+    assert!(!dir.path().join(".nzbd-restore.plain.tmp").exists());
+}
+
+#[tokio::test]
 async fn snapshot_round_trip_restores_everything_that_is_exported() {
     let e = env().await;
     let (_admin, uploader) = populate(&e).await;

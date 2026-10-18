@@ -11,34 +11,38 @@ transitive Go modules, listed with exact versions in [`deploy/proxy/go.mod`](dep
 
 ## Application (Rust)
 
-276 crates, by licence:
+This inventory uses the Linux production dependency tree of `nzbd` (normal and build dependencies) and `cargo metadata`
+for exact versions and declared licences. Local workspace crates and dependencies used only by tests or optional
+features absent from that tree are excluded. Each name/version pair is counted once.
+
+288 crates, by licence:
 
 | Licence | Crates |
 |---|---|
-| MIT OR Apache-2.0 | 148 |
-| MIT | 55 |
-| Apache-2.0 OR MIT | 18 |
+| MIT OR Apache-2.0 | 156 |
+| MIT | 56 |
+| Apache-2.0 OR MIT | 19 |
 | Unicode-3.0 | 18 |
-| MIT/Apache-2.0 | 6 |
+| MIT/Apache-2.0 | 8 |
 | Apache-2.0 | 5 |
 | Unlicense/MIT | 4 |
 | Unlicense OR MIT | 3 |
-| Zlib | 2 |
-| ISC | 2 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 2 |
+| ISC | 2 |
+| Zlib | 2 |
 | (Apache-2.0 OR MIT) AND BSD-3-Clause | 1 |
-| zlib-acknowledgement OR MIT | 1 |
-| Apache-2.0/MIT | 1 |
+| (MIT OR Apache-2.0) AND Unicode-3.0 | 1 |
 | Apache-2.0 / MIT | 1 |
 | Apache-2.0 / MIT / MPL-2.0 | 1 |
-| MIT AND BSD-3-Clause | 1 |
-| CC0-1.0 | 1 |
 | Apache-2.0 OR BSL-1.0 | 1 |
-| BSD-3-Clause | 1 |
-| Zlib OR Apache-2.0 OR MIT | 1 |
-| (MIT OR Apache-2.0) AND Unicode-3.0 | 1 |
 | Apache-2.0 OR BSL-1.0 OR MIT | 1 |
+| Apache-2.0/MIT | 1 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 1 |
+| BSD-3-Clause | 1 |
+| CC0-1.0 | 1 |
+| MIT AND BSD-3-Clause | 1 |
+| Zlib OR Apache-2.0 OR MIT | 1 |
+| zlib-acknowledgement OR MIT | 1 |
 
 Full list (name, version, licence):
 
@@ -60,6 +64,7 @@ Full list (name, version, licence):
 | async-trait | 0.1.92 | MIT OR Apache-2.0 |
 | atoi | 2.0.0 | MIT |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT |
+| autocfg | 1.5.1 | Apache-2.0 OR MIT |
 | axum | 0.8.9 | MIT |
 | axum-core | 0.5.6 | MIT |
 | base64 | 0.22.1 | MIT OR Apache-2.0 |
@@ -74,6 +79,7 @@ Full list (name, version, licence):
 | bon-macros | 3.10.2 | MIT OR Apache-2.0 |
 | byteorder | 1.5.0 | Unlicense OR MIT |
 | bytes | 1.12.1 | MIT |
+| cc | 1.6.0 | MIT OR Apache-2.0 |
 | census | 0.4.2 | MIT |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
 | chacha20 | 0.9.1 | Apache-2.0 OR MIT |
@@ -99,7 +105,7 @@ Full list (name, version, licence):
 | darling | 0.24.1 | MIT |
 | darling_core | 0.24.1 | MIT |
 | darling_macro | 0.24.1 | MIT |
-| datasketches | 0.2.0 | Apache-2.0 |
+| datasketches | 0.5.0 | Apache-2.0 |
 | deranged | 0.5.9 | MIT OR Apache-2.0 |
 | digest | 0.10.7 | MIT OR Apache-2.0 |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 |
@@ -113,6 +119,7 @@ Full list (name, version, licence):
 | event-listener | 5.4.2 | Apache-2.0 OR MIT |
 | fastdivide | 0.4.2 | zlib-acknowledgement OR MIT |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT |
+| find-msvc-tools | 0.1.14 | MIT OR Apache-2.0 |
 | flume | 0.11.1 | Apache-2.0/MIT |
 | fnv | 1.0.7 | Apache-2.0 / MIT |
 | foldhash | 0.1.5 | Zlib |
@@ -130,10 +137,10 @@ Full list (name, version, licence):
 | futures-util | 0.3.34 | MIT OR Apache-2.0 |
 | generic-array | 0.14.7 | MIT |
 | getrandom | 0.2.17 | MIT OR Apache-2.0 |
+| getrandom | 0.3.4 | MIT OR Apache-2.0 |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 |
 | glob | 0.3.4 | MIT OR Apache-2.0 |
 | hashbrown | 0.15.5 | MIT OR Apache-2.0 |
-| hashbrown | 0.16.1 | MIT OR Apache-2.0 |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 |
 | hashlink | 0.10.0 | MIT OR Apache-2.0 |
 | heck | 0.5.0 | MIT OR Apache-2.0 |
@@ -175,7 +182,7 @@ Full list (name, version, licence):
 | litemap | 0.8.3 | Unicode-3.0 |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 |
 | log | 0.4.34 | MIT OR Apache-2.0 |
-| lru | 0.16.4 | MIT |
+| lru | 0.18.5 | MIT |
 | matchers | 0.2.0 | MIT |
 | matchit | 0.8.4 | MIT AND BSD-3-Clause |
 | md-5 | 0.10.6 | MIT OR Apache-2.0 |
@@ -187,7 +194,7 @@ Full list (name, version, licence):
 | mio | 1.2.4 | MIT |
 | multer | 3.1.0 | MIT |
 | multiversion_no_op | 1.0.0 | Apache-2.0 OR MIT |
-| murmurhash32 | 0.3.1 | MIT |
+| murmurhash32 | 0.4.0 | MIT |
 | nom | 7.1.3 | MIT |
 | notify | 8.2.0 | CC0-1.0 |
 | notify-types | 2.1.0 | MIT OR Apache-2.0 |
@@ -205,6 +212,7 @@ Full list (name, version, licence):
 | password-hash | 0.5.0 | MIT OR Apache-2.0 |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT |
+| pkg-config | 0.3.34 | MIT OR Apache-2.0 |
 | poly1305 | 0.8.0 | Apache-2.0 OR MIT |
 | potential_utf | 0.1.6 | Unicode-3.0 |
 | powerfmt | 0.2.1 | MIT OR Apache-2.0 |
@@ -215,8 +223,11 @@ Full list (name, version, licence):
 | quick-xml | 0.42.0 | MIT |
 | quote | 1.0.47 | MIT OR Apache-2.0 |
 | rand | 0.8.8 | MIT OR Apache-2.0 |
+| rand | 0.9.5 | MIT OR Apache-2.0 |
 | rand_chacha | 0.3.1 | MIT OR Apache-2.0 |
+| rand_chacha | 0.9.0 | MIT OR Apache-2.0 |
 | rand_core | 0.6.4 | MIT OR Apache-2.0 |
+| rand_core | 0.9.5 | MIT OR Apache-2.0 |
 | rayon | 1.12.0 | MIT OR Apache-2.0 |
 | rayon-core | 1.13.0 | MIT OR Apache-2.0 |
 | regex | 1.13.1 | MIT OR Apache-2.0 |
@@ -231,6 +242,7 @@ Full list (name, version, licence):
 | same-file | 1.0.6 | Unlicense/MIT |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 |
 | serde | 1.0.229 | MIT OR Apache-2.0 |
+| serde-tuple-vec-map | 1.0.1 | MIT |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 |
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
@@ -239,6 +251,7 @@ Full list (name, version, licence):
 | sha1 | 0.10.7 | MIT OR Apache-2.0 |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 |
 | sharded-slab | 0.1.7 | MIT |
+| shlex | 2.0.1 | MIT OR Apache-2.0 |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 |
 | simdutf8 | 0.1.5 | MIT OR Apache-2.0 |
 | sketches-ddsketch | 0.4.1 | Apache-2.0 |
@@ -260,14 +273,14 @@ Full list (name, version, licence):
 | syn | 3.0.6 | MIT OR Apache-2.0 |
 | sync_wrapper | 1.0.2 | Apache-2.0 |
 | synstructure | 0.14.0 | MIT |
-| tantivy | 0.26.2 | MIT |
-| tantivy-bitpacker | 0.10.0 | MIT |
-| tantivy-columnar | 0.7.0 | MIT |
-| tantivy-common | 0.11.0 | MIT |
+| tantivy | 0.27.0 | MIT |
+| tantivy-bitpacker | 0.27.0 | MIT |
+| tantivy-columnar | 0.27.0 | MIT |
+| tantivy-common | 0.27.0 | MIT |
 | tantivy-fst | 0.5.0 | Unlicense/MIT |
-| tantivy-query-grammar | 0.26.0 | MIT |
-| tantivy-sstable | 0.7.0 | MIT |
-| tantivy-stacker | 0.7.0 | MIT |
+| tantivy-query-grammar | 0.27.0 | MIT |
+| tantivy-sstable | 0.27.0 | MIT |
+| tantivy-stacker | 0.27.0 | MIT |
 | tantivy-tokenizer-api | 0.7.0 | MIT |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 |
@@ -301,11 +314,14 @@ Full list (name, version, licence):
 | unicode-normalization | 0.1.25 | MIT OR Apache-2.0 |
 | unicode-properties | 0.1.4 | MIT/Apache-2.0 |
 | universal-hash | 0.5.1 | MIT OR Apache-2.0 |
+| unwrap-infallible | 1.0.0 | MIT OR Apache-2.0 |
 | url | 2.5.8 | MIT OR Apache-2.0 |
 | utf8-ranges | 1.0.5 | Unlicense/MIT |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT |
 | uuid | 1.28.0 | Apache-2.0 OR MIT |
+| vcpkg | 0.2.15 | MIT/Apache-2.0 |
+| version_check | 0.9.5 | MIT/Apache-2.0 |
 | walkdir | 2.5.0 | Unlicense/MIT |
 | whoami | 1.6.1 | Apache-2.0 OR BSL-1.0 OR MIT |
 | winnow | 1.0.4 | MIT |

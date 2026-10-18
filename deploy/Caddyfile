@@ -23,10 +23,9 @@
 				request>headers>X-Csrf-Token replace REDACTED
 				request>headers>Cookie replace REDACTED
 				request>headers>Authorization replace REDACTED
-				request>uri query {
-					replace api_key REDACTED
-					replace key REDACTED
-				}
+				request>headers>Referer replace REDACTED
+				# Redact the whole URI: callers can put tokens in arbitrary query keys or paths.
+				request>uri replace REDACTED
 			}
 		}
 	}
@@ -64,9 +63,21 @@
 		respond 404
 	}
 
-	# Body limit must be >= limits.max_file_bytes (64 MiB ceiling) plus multipart overhead.
-	@nzbupload path /upload /api/v1/nzb
-	handle @nzbupload {
+	# UI batches may hold five maximum-size NZBs plus 320 KiB multipart overhead
+	# (nzb-web middleware::UI_UPLOAD_CEILING_FILES). The app still enforces each file's cap.
+	handle /upload {
+		request_body {
+			max_size 321MiB
+		}
+		reverse_proxy nzbd:8080 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up -Authorization
+		}
+	}
+
+	# The API accepts one NZB: 64 MiB plus multipart overhead.
+	handle /api/v1/nzb {
 		request_body {
 			max_size 65MiB
 		}

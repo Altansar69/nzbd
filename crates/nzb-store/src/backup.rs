@@ -146,6 +146,32 @@ pub(crate) fn is_backup_name(name: &str) -> bool {
         })
 }
 
+/// The worker owns every resource until the snapshot and cleanup finish. Dropping the caller's
+/// future only detaches its join handle: `SQLx` may continue `VACUUM INTO` after an awaiting future
+/// is cancelled, so the directory lock must not belong to that future. Filesystem work and
+/// encryption also stay off the async runtime threads. Every owned key copy zeroizes on drop.
+async fn run_backup(
+    pool: SqlitePool,
+    dir: PathBuf,
+    now: i64,
+    keep: usize,
+    key: Option<BackupKey>,
+    close_pool: bool,
+) -> Result<BackupReport, StoreError> {
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            let result = backup_pool(&pool, &dir, now, keep, key.as_ref()).await;
+            if close_pool {
+                pool.close().await;
+            }
+            result
+        })
+    })
+    .await
+    .map_err(|_| StoreError::Io(std::io::Error::other("backup worker failed")))?
+}
+
 /// Snapshot `pool`'s database into `dir`, then rotate to `keep` files (min 1).
 async fn backup_pool(
     pool: &SqlitePool,
@@ -154,6 +180,12 @@ async fn backup_pool(
     keep: usize,
     key: Option<&BackupKey>,
 ) -> Result<BackupReport, StoreError> {
+    // The directory inode is shared by every handle/process using this destination. Hold its
+    // advisory lock through cleanup, snapshot publication and rotation: a CLI backup must not
+    // remove the in-flight temporary snapshot of the server's maintenance task (or vice versa).
+    // No lock file is created or unlinked, so there is no stale-file or lock-inode replacement race.
+    let _lock = lock_backup_dir(dir)?;
+    clean_stale_tmp(dir)?;
     let name = backup_name(now);
     let final_name = if key.is_some() {
         format!("{name}{ENC_SUFFIX}")
@@ -188,10 +220,6 @@ async fn backup_pool(
     })
 }
 
-/// Advisory lock on the backup directory inode, held by every backup of this destination (server
-/// maintenance task or `nzbd backup`): one must not remove the in-flight temporary snapshot of the
-/// other, and two of the same second must not race past the "never overwritten" check. No lock
-/// file is created, so there is no stale-file or lock-inode replacement race.
 pub(crate) fn lock_backup_dir(dir: &Path) -> Result<File, StoreError> {
     let file = File::open(dir)?;
     match file.try_lock() {
@@ -391,14 +419,7 @@ pub async fn backup_file_with(
                 .busy_timeout(std::time::Duration::from_secs(5)),
         )
         .await?;
-    let r = async {
-        let _lock = lock_backup_dir(dir)?;
-        clean_stale_tmp(dir)?;
-        backup_pool(&pool, dir, now, keep, key).await
-    }
-    .await;
-    pool.close().await;
-    r
+    run_backup(pool, dir.to_path_buf(), now, keep, key.cloned(), true).await
 }
 
 impl SqliteDb {
@@ -426,9 +447,15 @@ impl SqliteDb {
         keep: usize,
         key: Option<&BackupKey>,
     ) -> Result<BackupReport, StoreError> {
-        let _lock = lock_backup_dir(dir)?;
-        clean_stale_tmp(dir)?;
-        backup_pool(self.readers(), dir, now, keep, key).await
+        run_backup(
+            self.readers().clone(),
+            dir.to_path_buf(),
+            now,
+            keep,
+            key.cloned(),
+            false,
+        )
+        .await
     }
 
     /// Delete sessions whose `expires_at` is at or before `now`. Returns rows removed.

@@ -14,6 +14,9 @@
 //! bucket of the store's `_v2` verdicts. A throttled attempt has already paid for the same
 //! Argon2 verification (or the dummy one) and gets the response of a wrong password.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use askama::Template;
 use axum::Router;
 use axum::body::Bytes;
@@ -24,6 +27,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use nzb_store::prelude::*;
 use nzb_store::{SessionStage, username_is_valid};
+use tokio::sync::Semaphore;
 
 use crate::assets::Layout;
 use crate::auth::{AuthError, AuthState, ClientMeta, MAX_VERIFY_WAITERS};
@@ -130,6 +134,45 @@ fn is_urlencoded_form(headers: &HeaderMap) -> bool {
         })
 }
 
+/// Removes an admitted waiter even if its request is cancelled before a slot is available.
+struct PasswordWaiter<'a>(&'a AtomicUsize);
+
+impl Drop for PasswordWaiter<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Runs password work with a bounded, cancellation-safe queue. The blocking task owns the
+/// permit: dropping its request cannot release capacity while Argon2 is still using memory.
+pub(crate) async fn password_work<T, F>(
+    slots: &Arc<Semaphore>,
+    waiting: &AtomicUsize,
+    max_waiters: usize,
+    work: F,
+) -> Result<T, AuthError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if waiting.fetch_add(1, Ordering::AcqRel) >= max_waiters {
+        waiting.fetch_sub(1, Ordering::AcqRel);
+        return Err(AuthError::Busy);
+    }
+    let waiter = PasswordWaiter(waiting);
+    let permit = Arc::clone(slots)
+        .acquire_owned()
+        .await
+        .map_err(|_| AuthError::Task)?;
+    drop(waiter);
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| AuthError::Task)
+}
+
 /// One Argon2id verification on the blocking pool, bounded by `verify_concurrency` (each run
 /// needs 64 MiB). The wait queue is bounded too (L3): when it is full the request is refused
 /// with `AuthError::Busy` instead of piling up until the request timeout.
@@ -138,38 +181,31 @@ pub(crate) async fn verify_blocking(
     pw: String,
     hash: String,
 ) -> Result<bool, AuthError> {
-    use std::sync::atomic::Ordering;
-    let waiting = &auth.0.verify_waiting;
-    if waiting.fetch_add(1, Ordering::AcqRel) >= MAX_VERIFY_WAITERS {
-        waiting.fetch_sub(1, Ordering::AcqRel);
-        return Err(AuthError::Busy);
-    }
-    let permit = auth.0.verify_slots.acquire().await;
-    waiting.fetch_sub(1, Ordering::AcqRel);
-    let _permit = permit.map_err(|_| AuthError::Task)?;
-    let r = tokio::task::spawn_blocking(move || password::verify_password(&pw, &hash))
-        .await
-        .map_err(|_| AuthError::Task);
-    auth.0.verify_runs.fetch_add(1, Ordering::Relaxed);
-    r
+    let state = auth.clone();
+    password_work(
+        &auth.0.verify_slots,
+        &auth.0.verify_waiting,
+        MAX_VERIFY_WAITERS,
+        move || {
+            let accepted = password::verify_password(&pw, &hash);
+            state.0.verify_runs.fetch_add(1, Ordering::Relaxed);
+            accepted
+        },
+    )
+    .await
 }
 
 /// Hashes a new password on the blocking pool under the same bounded slots as verification
 /// (each Argon2id run needs 64 MiB).
 pub(crate) async fn hash_blocking(auth: &AuthState, pw: String) -> Result<String, AuthError> {
-    use std::sync::atomic::Ordering;
-    let waiting = &auth.0.verify_waiting;
-    if waiting.fetch_add(1, Ordering::AcqRel) >= MAX_VERIFY_WAITERS {
-        waiting.fetch_sub(1, Ordering::AcqRel);
-        return Err(AuthError::Busy);
-    }
-    let permit = auth.0.verify_slots.acquire().await;
-    waiting.fetch_sub(1, Ordering::AcqRel);
-    let _permit = permit.map_err(|_| AuthError::Task)?;
-    tokio::task::spawn_blocking(move || password::hash_password(&pw))
-        .await
-        .map_err(|_| AuthError::Task)?
-        .map_err(AuthError::from)
+    password_work(
+        &auth.0.verify_slots,
+        &auth.0.verify_waiting,
+        MAX_VERIFY_WAITERS,
+        move || password::hash_password(&pw),
+    )
+    .await?
+    .map_err(AuthError::from)
 }
 
 enum Outcome {
@@ -372,4 +408,123 @@ pub(crate) fn routes(auth: &AuthState) -> Router {
         .merge(invite)
         .merge(mfa.with_state(auth.clone()))
         .layer(from_fn_with_state(auth.clone(), host_layer))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::time::Duration;
+
+    use super::*;
+
+    fn hash_work() -> bool {
+        password::hash_password("queue cancellation regression").is_ok()
+    }
+
+    fn verify_work() -> bool {
+        // Valid bounded work factors, deliberately unrelated digest: still runs full Argon2.
+        let phc = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g";
+        !password::verify_password("queue cancellation regression", phc)
+    }
+
+    async fn cancelled_waiter(work: fn() -> bool) {
+        // Both the login and the invitation queue must remain usable after cancellation.
+        for limit in [MAX_VERIFY_WAITERS, crate::auth::MAX_INVITE_WAITERS] {
+            let slots = Arc::new(Semaphore::new(1));
+            let waiting = AtomicUsize::new(0);
+            let occupied = slots.acquire().await.unwrap();
+            // Repeat beyond the capacity: the old counter leak permanently filled the queue.
+            for _ in 0..=limit {
+                let mut pending = Box::pin(password_work(&slots, &waiting, limit, work));
+                assert!(futures_util::poll!(pending.as_mut()).is_pending());
+                assert_eq!(waiting.load(Ordering::Acquire), 1);
+                drop(pending);
+                assert_eq!(waiting.load(Ordering::Acquire), 0);
+            }
+            drop(occupied);
+            assert!(password_work(&slots, &waiting, limit, work).await.unwrap());
+            assert_eq!(slots.available_permits(), 1);
+        }
+    }
+
+    async fn cancelled_running_work(work: fn() -> bool) {
+        let slots = Arc::new(Semaphore::new(1));
+        let waiting = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let task_slots = Arc::clone(&slots);
+        let task_waiting = Arc::clone(&waiting);
+        let request = tokio::spawn(async move {
+            password_work(&task_slots, &task_waiting, MAX_VERIFY_WAITERS, move || {
+                started_tx.send(()).unwrap();
+                // The latch makes cancellation deterministic, without relying on Argon2 speed.
+                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                let result = work();
+                let _ = finished_tx.send(result);
+                result
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert_eq!(waiting.load(Ordering::Acquire), 0);
+        assert_eq!(slots.available_permits(), 0);
+        assert!(slots.try_acquire().is_err());
+        release_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), finished_rx)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        // The worker itself releases the slot when the blocking work actually finishes.
+        let permit = tokio::time::timeout(Duration::from_secs(10), slots.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_hash_waiter_does_not_poison_queue() {
+        cancelled_waiter(hash_work).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_verify_waiter_does_not_poison_queue() {
+        cancelled_waiter(verify_work).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_hash_request_keeps_running_work_permit() {
+        cancelled_running_work(hash_work).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_verify_request_keeps_running_work_permit() {
+        cancelled_running_work(verify_work).await;
+    }
+
+    #[tokio::test]
+    async fn password_queue_overflow_and_closed_semaphore_restore_waiter_count() {
+        let slots = Arc::new(Semaphore::new(0));
+        let waiting = AtomicUsize::new(0);
+        let mut pending = Box::pin(password_work(&slots, &waiting, 1, || true));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        assert!(matches!(
+            password_work(&slots, &waiting, 1, || true).await,
+            Err(AuthError::Busy)
+        ));
+        assert_eq!(waiting.load(Ordering::Acquire), 1);
+        slots.close();
+        assert!(matches!(pending.await, Err(AuthError::Task)));
+        assert_eq!(waiting.load(Ordering::Acquire), 0);
+    }
 }

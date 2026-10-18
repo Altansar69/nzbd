@@ -56,6 +56,16 @@ async fn redeem(e: &Env, n: u8, sess_n: u8, now: i64) -> Result<Redeemed, StoreE
 }
 
 async fn redeem_on(db: &PgDb, n: u8, sess_n: u8, now: i64) -> Result<Redeemed, StoreError> {
+    redeem_on_replacing(db, n, sess_n, None, now).await
+}
+
+async fn redeem_on_replacing(
+    db: &PgDb,
+    n: u8,
+    sess_n: u8,
+    replacing: Option<&[u8; 32]>,
+    now: i64,
+) -> Result<Redeemed, StoreError> {
     let h = code(n).hash();
     let s = sess(0, sess_n, SessionStage::PendingMfa, now);
     let name = chosen_name(n);
@@ -64,6 +74,7 @@ async fn redeem_on(db: &PgDb, n: u8, sess_n: u8, now: i64) -> Result<Redeemed, S
             code_hash: &h,
             password_hash: PHC,
             session: &s,
+            replacing,
         },
         &RegistrationProfile {
             email: TEST_EMAIL,
@@ -115,6 +126,135 @@ async fn password_of(e: &Env, id: i64) -> String {
         .fetch_one(e.db.web())
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn sec_063_redemption_replaces_presented_session_for_invitation_and_recovery() {
+    for recovery in [false, true] {
+        let (e, _admin, member, actor) = world().await;
+        for n in [40, 41] {
+            e.db.insert_session(&sess(member, n, SessionStage::Active, T0), 5)
+                .await
+                .unwrap();
+        }
+        if recovery {
+            recover(&e, &actor, member, 10, T0).await;
+        } else {
+            invite(&e, &actor, "newcomer", GrantableRole::Uploader, 10, T0).await;
+        }
+        let done = redeem_on_replacing(&e.db, 10, 50, Some(&[40; 32]), T0 + 1)
+            .await
+            .unwrap();
+        let expected_user = match done {
+            Redeemed::Recovery { user_id, .. } => {
+                assert!(recovery);
+                assert_eq!(user_id, member);
+                user_id
+            }
+            Redeemed::Account { user_id, .. } => {
+                assert!(!recovery);
+                assert_ne!(user_id, member);
+                user_id
+            }
+        };
+        assert!(e.db.get_session(&[40; 32]).await.unwrap().is_none());
+        assert!(e.db.get_session(&[41; 32]).await.unwrap().is_some());
+        let pending = e.db.get_session(&[50; 32]).await.unwrap().unwrap();
+        assert_eq!(pending.user_id, expected_user);
+        assert_eq!(pending.stage, SessionStage::PendingMfa);
+        assert_eq!(e.count("invite", "used_at IS NOT NULL").await, 1);
+        assert_eq!(
+            e.count("credential_staging", "1=1").await,
+            i64::from(recovery)
+        );
+        if recovery {
+            assert!(
+                e.db.staged_swap(member, &[50; 32], T0 + 2)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(password_of(&e, member).await, "old-hash");
+        }
+    }
+}
+
+#[tokio::test]
+async fn sec_063_rejected_redemption_preserves_presented_session() {
+    let (e, _admin, member, actor) = world().await;
+    e.db.insert_session(&sess(member, 40, SessionStage::Active, T0), 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        err_code(redeem_on_replacing(&e.db, 10, 50, Some(&[40; 32]), T0 + 1).await),
+        "INVALID_CODE"
+    );
+    invite(&e, &actor, "newcomer", GrantableRole::Uploader, 10, T0).await;
+    // This refusal commits its counter, but must not revoke the caller's existing session.
+    e.db.set_display_name_operator(member, Some(&chosen_name(10)), T0)
+        .await
+        .unwrap();
+    assert_eq!(
+        err_code(redeem_on_replacing(&e.db, 10, 50, Some(&[40; 32]), T0 + 2).await),
+        "DISPLAY_NAME_UNAVAILABLE"
+    );
+    assert!(e.db.get_session(&[40; 32]).await.unwrap().is_some());
+    assert!(e.db.get_session(&[50; 32]).await.unwrap().is_none());
+    assert_eq!(e.count("invite", "used_at IS NOT NULL").await, 0);
+    assert_eq!(e.count("invite", "name_refusals = 1").await, 1);
+}
+
+#[tokio::test]
+async fn sec_063_redemption_revoke_failure_rolls_back_invitation_and_recovery() {
+    for recovery in [false, true] {
+        let (e, _admin, member, actor) = world().await;
+        e.db.insert_session(&sess(member, 40, SessionStage::Active, T0), 5)
+            .await
+            .unwrap();
+        if recovery {
+            recover(&e, &actor, member, 10, T0).await;
+        } else {
+            invite(&e, &actor, "newcomer", GrantableRole::Uploader, 10, T0).await;
+        }
+        e.superuser_exec(
+            "CREATE FUNCTION nzbd.reject_session_delete() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'injected revoke failure'; END $$; \
+             CREATE TRIGGER reject_session_delete BEFORE DELETE ON nzbd.session FOR EACH ROW \
+             EXECUTE FUNCTION nzbd.reject_session_delete();",
+        )
+        .await;
+        // The DELETE happens after the account/session/code/audit writes in the transaction.
+        // A failure must undo every one of them, not leave a consumed invitation behind.
+        let result = redeem_on_replacing(&e.db, 10, 50, Some(&[40; 32]), T0 + 1).await;
+        assert!(matches!(result, Err(StoreError::Db(_))));
+        assert!(e.db.get_session(&[40; 32]).await.unwrap().is_some());
+        assert!(e.db.get_session(&[50; 32]).await.unwrap().is_none());
+        assert_eq!(e.count("account", "1=1").await, 2);
+        assert_eq!(e.count("invite", "used_at IS NOT NULL").await, 0);
+        assert_eq!(e.count("credential_staging", "1=1").await, 0);
+        assert_eq!(
+            e.audit(if recovery {
+                "recover_redeem"
+            } else {
+                "invite_redeem"
+            })
+            .await,
+            Vec::new()
+        );
+        assert_eq!(password_of(&e, member).await, "old-hash");
+        e.superuser_exec(
+            "DROP TRIGGER reject_session_delete ON nzbd.session; \
+             DROP FUNCTION nzbd.reject_session_delete();",
+        )
+        .await;
+        assert!(
+            redeem_on_replacing(&e.db, 10, 50, Some(&[40; 32]), T0 + 2)
+                .await
+                .is_ok()
+        );
+        assert!(e.db.get_session(&[40; 32]).await.unwrap().is_none());
+        assert!(e.db.get_session(&[50; 32]).await.unwrap().is_some());
+    }
 }
 
 #[test]
@@ -212,6 +352,7 @@ async fn sec_063_code_is_stored_hashed_and_shown_once() {
         code_hash: &h,
         password_hash: PHC,
         session: &s,
+        replacing: None,
     };
     assert!(!format!("{r:?}").contains(PHC));
     let _ = a;
@@ -1168,6 +1309,61 @@ async fn sec_067_recover_redeem_names_the_issuer() {
 }
 
 #[tokio::test]
+async fn sec_063_invite_and_recovery_revocation_require_current_admin_session() {
+    let (e, a, m, act) = world().await;
+    for n in [80, 81] {
+        e.db.insert_session(&sess(a, n, SessionStage::Active, T0), 5)
+            .await
+            .unwrap();
+    }
+    let stale = AccountActor {
+        session: Some([80; 32]),
+        ..act.clone()
+    };
+    let open = invite(&e, &stale, "guest", GrantableRole::Viewer, 8, T0).await;
+    recover(&e, &stale, m, 9, T0).await;
+    redeem(&e, 9, 90, T0 + 1).await.unwrap();
+    // Both requests authenticated before their cookie was revoked, then waited for their body.
+    assert!(e.db.delete_session(&[80; 32]).await.unwrap());
+    assert_eq!(
+        err_code(e.db.revoke_invite(&stale, open, None, T0 + 2).await),
+        "FORBIDDEN"
+    );
+    assert_eq!(
+        err_code(e.db.cancel_recovery(&stale, m, None, T0 + 2).await),
+        "FORBIDDEN"
+    );
+    assert!(
+        e.db.get_invite(open)
+            .await
+            .unwrap()
+            .unwrap()
+            .revoked_at
+            .is_none()
+    );
+    assert!(e.db.get_session(&[90; 32]).await.unwrap().is_some());
+    assert_eq!(e.count("credential_staging", "1=1").await, 1);
+    assert_eq!(e.audit("invite_revoke").await.len(), 0);
+    assert_eq!(e.audit("recover_cancel").await.len(), 0);
+
+    // A current admin session retains both cancellation operations.
+    let live = AccountActor {
+        session: Some([81; 32]),
+        ..act
+    };
+    e.db.revoke_invite(&live, open, None, T0 + 3).await.unwrap();
+    e.db.cancel_recovery(&live, m, None, T0 + 3).await.unwrap();
+    assert_eq!(
+        e.db.get_invite(open).await.unwrap().unwrap().revoked_at,
+        Some(T0 + 3)
+    );
+    assert!(e.db.get_session(&[90; 32]).await.unwrap().is_none());
+    assert_eq!(e.count("credential_staging", "1=1").await, 0);
+    assert_eq!(e.audit("invite_revoke").await.len(), 1);
+    assert_eq!(e.audit("recover_cancel").await.len(), 1);
+}
+
+#[tokio::test]
 async fn maintenance_purges_only_what_the_retention_says() {
     let (e, _a, _m, act) = world().await;
     invite(&e, &act, "old-used", GrantableRole::Viewer, 1, T0).await;
@@ -1213,6 +1409,7 @@ async fn redemption_is_refused_while_multi_user_is_off() {
                 code_hash: &h,
                 password_hash: PHC,
                 session: &s,
+                replacing: None,
             },
             &RegistrationProfile {
                 email: TEST_EMAIL,
@@ -1299,6 +1496,7 @@ async fn sec_061_registration_disabled_store_refuses_invites_and_keeps_recovery(
                 code_hash: &h,
                 password_hash: PHC,
                 session: &s,
+                replacing: None,
             },
             &RegistrationProfile {
                 email: TEST_EMAIL,
@@ -1337,6 +1535,7 @@ async fn sec_061_registration_disabled_store_refuses_invites_and_keeps_recovery(
                 code_hash: &h3,
                 password_hash: PHC,
                 session: &s3,
+                replacing: None,
             },
             &RegistrationProfile {
                 email: TEST_EMAIL,
@@ -1395,6 +1594,114 @@ async fn password_change_is_bound_to_the_reauthenticated_session() {
     assert_eq!(password_of(&e, m).await, "owner-new");
     assert!(e.db.get_session(&[70; 32]).await.unwrap().is_none());
     assert!(e.db.get_session(&[72; 32]).await.unwrap().is_none());
+    assert!(e.db.get_session(&[71; 32]).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn sec_024_expired_session_cannot_change_credentials_or_admin_state() {
+    let (e, a, m, act) = world().await;
+    for (id, n) in [(m, 70), (a, 71)] {
+        e.db.insert_session(&sess(id, n, SessionStage::Active, T0), 5)
+            .await
+            .unwrap();
+    }
+    e.db.replace_recovery_codes(m, &[70; 32], &[[7; 32]], None, T0 + 1)
+        .await
+        .unwrap();
+    let now = T0 + 3600;
+    // Expired rows have not been purged. The request's late activity touch must not revive one.
+    e.db.touch_session(&[70; 32], now, now + 3600)
+        .await
+        .unwrap();
+    let password =
+        e.db.change_password(
+            m,
+            &[70; 32],
+            "late-password",
+            &sess(m, 72, SessionStage::Active, now),
+            None,
+            now,
+        )
+        .await;
+    assert!(matches!(password, Err(StoreError::NotFound)));
+    assert_eq!(password_of(&e, m).await, "old-hash");
+    assert!(e.db.get_session(&[72; 32]).await.unwrap().is_none());
+    let codes =
+        e.db.replace_recovery_codes(m, &[70; 32], &[], None, now)
+            .await;
+    assert!(matches!(codes, Err(StoreError::NotFound)));
+    assert_eq!(e.db.count_unused_recovery_codes(m).await.unwrap(), 1);
+    let key =
+        e.db.create_api_key_for_session(
+            crate::NewApiKey {
+                label: "late",
+                prefix: "abcdef",
+                key_hash: &[8; 32],
+                rate_per_min: None,
+            },
+            m,
+            &[70; 32],
+            10,
+            now,
+            &crate::AuditActor::account(m, Role::Uploader, "mem"),
+            None,
+        )
+        .await;
+    assert!(matches!(key, Err(StoreError::NotFound)));
+    assert_eq!(e.count("api_key", "1=1").await, 0);
+
+    let expired_admin = AccountActor {
+        session: Some([71; 32]),
+        ..act
+    };
+    let h = code(20).hash();
+    assert_eq!(
+        err_code(
+            e.db.create_invite(
+                &expired_admin,
+                &NewInvite {
+                    username: "late",
+                    role: GrantableRole::Viewer,
+                    code_hash: &h,
+                    ttl_secs: 3600,
+                },
+                POLICY,
+                None,
+                now,
+            )
+            .await
+        ),
+        "FORBIDDEN"
+    );
+    assert_eq!(
+        err_code(
+            e.db.issue_recovery(
+                &expired_admin,
+                &NewRecovery {
+                    target_id: m,
+                    code_hash: &h,
+                    ttl_secs: 3600
+                },
+                None,
+                now,
+            )
+            .await
+        ),
+        "FORBIDDEN"
+    );
+    assert_eq!(
+        err_code(
+            e.db.set_role(&expired_admin, m, GrantableRole::Viewer, None, now)
+                .await
+        ),
+        "FORBIDDEN"
+    );
+    assert_eq!(e.count("invite", "1=1").await, 0);
+    assert_eq!(
+        e.db.get_account(m).await.unwrap().unwrap().role,
+        Role::Uploader
+    );
+    assert!(e.db.get_session(&[70; 32]).await.unwrap().is_some());
     assert!(e.db.get_session(&[71; 32]).await.unwrap().is_some());
 }
 

@@ -28,6 +28,8 @@ pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+disallowed_types = "deny"
+disallowed_methods = "deny"
 indexing_slicing = "deny"
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"

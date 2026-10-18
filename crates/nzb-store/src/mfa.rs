@@ -143,6 +143,26 @@ async fn username_of(
     )
 }
 
+/// A delayed request cannot revoke sessions after its own authentication was revoked or expired.
+async fn require_revoking_session(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: i64,
+    session_hash: &[u8; 32],
+    now: i64,
+) -> Result<(), StoreError> {
+    let live: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM session s JOIN account a ON a.id = s.account_id \
+         WHERE s.id_hash = ?1 AND s.account_id = ?2 AND s.stage = 'active' \
+         AND s.expires_at > ?3 AND a.disabled_at IS NULL AND a.deleted_at IS NULL",
+    )
+    .bind(session_hash.as_slice())
+    .bind(user_id)
+    .bind(now)
+    .fetch_optional(&mut *conn)
+    .await?;
+    live.map(|_| ()).ok_or(StoreError::NotFound)
+}
+
 impl SqliteDb {
     /// Arms enrollment: stores `SHA-256(token)` and its expiry for the only user, replacing any
     /// earlier token. Returns `false` when TOTP is already enabled (nothing to enroll) and
@@ -501,7 +521,7 @@ impl SqliteDb {
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.begin_immediate().await?;
-        if !crate::auth::session_is_live(&mut tx, session_hash, user_id).await? {
+        if !crate::auth::session_is_live(&mut tx, session_hash, user_id, now).await? {
             return Err(StoreError::NotFound);
         }
         sqlx::query("DELETE FROM recovery_code WHERE account_id = ?1")
@@ -563,10 +583,12 @@ impl SqliteDb {
     ) -> Result<(), StoreError> {
         let mut tx = self.begin_immediate().await?;
         let own = sqlx::query(
-            "DELETE FROM session WHERE id_hash = ?1 AND account_id = ?2 AND stage = 'active'",
+            "DELETE FROM session WHERE id_hash = ?1 AND account_id = ?2 \
+             AND stage = 'active' AND expires_at > ?3",
         )
         .bind(session_hash.as_slice())
         .bind(user_id)
+        .bind(now)
         .execute(&mut *tx)
         .await?;
         if own.rows_affected() == 0 {
@@ -641,18 +663,21 @@ impl SqliteDb {
             .collect()
     }
 
-    /// Revokes one session, but only if it belongs to `user_id`. Audit-logged when removed.
+    /// Revokes one session owned by `user_id`, while the calling session is still active.
+    /// Audit-logged when removed.
     ///
     /// # Errors
-    /// Database failure.
+    /// [`StoreError::NotFound`] if the calling session is no longer usable; database failure.
     pub async fn revoke_user_session(
         &self,
         user_id: i64,
+        session_hash: &[u8; 32],
         id_hash: &[u8; 32],
         ip: Option<&str>,
         now: i64,
     ) -> Result<bool, StoreError> {
         let mut tx = self.begin_immediate().await?;
+        require_revoking_session(&mut tx, user_id, session_hash, now).await?;
         let n = sqlx::query("DELETE FROM session WHERE account_id = ?1 AND id_hash = ?2")
             .bind(user_id)
             .bind(id_hash.as_slice())
@@ -667,10 +692,11 @@ impl SqliteDb {
         Ok(n > 0)
     }
 
-    /// Revokes every session of the user except `keep`. Returns how many were removed.
+    /// Revokes every session of the user except the still-active calling session `keep`.
+    /// Returns how many were removed.
     ///
     /// # Errors
-    /// Database failure.
+    /// [`StoreError::NotFound`] if the calling session is no longer usable; database failure.
     pub async fn revoke_other_sessions(
         &self,
         user_id: i64,
@@ -679,6 +705,7 @@ impl SqliteDb {
         now: i64,
     ) -> Result<u64, StoreError> {
         let mut tx = self.begin_immediate().await?;
+        require_revoking_session(&mut tx, user_id, keep, now).await?;
         let n = sqlx::query("DELETE FROM session WHERE account_id = ?1 AND id_hash <> ?2")
             .bind(user_id)
             .bind(keep.as_slice())

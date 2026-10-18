@@ -34,8 +34,10 @@
 //! central directory record the producer sends an explicit **end marker**; the body ends cleanly
 //! only after it (review 46 L2).
 //!
-//! The permits are released when the producer ends: archive complete, client gone (the next send
-//! fails), store error, too slow a reader, or the deadline. **Deadline:** one `Instant` shared by
+//! The permits are released when the producer and any in-flight blob read have ended: archive
+//! complete, client gone (the next send fails), store error, too slow a reader, or the deadline.
+//! A timed-out response never releases capacity while a non-cancellable store read is still active.
+//! **Deadline:** one `Instant` shared by
 //! body and producer, [`BulkLimits::deadline`] of the total stored size: 60 s + 1 s per MiB, at
 //! most [`BULK_DEADLINE_MAX`] (4 min 30 s, below the shipped proxy's 5-minute write timeout, review
 //! 46 L3). **Minimum throughput** (review 46 L1): after a [`BULK_PROGRESS_GRACE`] of 30 s, every
@@ -202,6 +204,13 @@ impl BulkState {
 struct Running {
     state: Arc<BulkState>,
     user_id: i64,
+}
+
+/// Both admission permits and the account slot follow any blob read that outlives the producer.
+struct Capacity {
+    _download: OwnedSemaphorePermit,
+    _bulk: OwnedSemaphorePermit,
+    _running: Running,
 }
 
 impl Running {
@@ -577,12 +586,26 @@ async fn vanished(job: &Job, e: &Entry) -> bool {
 }
 
 /// Writes the archive and the end marker. Any `Err` leaves the archive without its end.
-async fn produce(job: Job, pacer: &mut Pacer) -> Result<(), Stop> {
+async fn produce(job: Job, pacer: &mut Pacer, capacity: Arc<Capacity>) -> Result<(), Stop> {
     let (time, date) = job.dos;
     let mut zip = ZipWriter::new(time, date);
     let mut total: u64 = 0;
     for e in &job.entries {
-        let bytes = match job.store.get(&e.sha).await {
+        // FsStore reads on spawn_blocking: cancelling its future cannot stop the underlying I/O.
+        // The owned task keeps capacity until that read really ends, even if the archive deadline
+        // drops the producer (and therefore this JoinHandle) before the bytes are returned.
+        let store = Arc::clone(&job.store);
+        let sha = e.sha;
+        let held = Arc::clone(&capacity);
+        let read = tokio::spawn(async move {
+            let _held = held;
+            store.get(&sha).await
+        });
+        let result = read.await.map_err(|_| {
+            tracing::error!(release_id = e.id, "bulk blob read task failed");
+            Stop::Failed
+        })?;
+        let bytes = match result {
             Ok(b) => b,
             Err(StoreError::NotFound) if vanished(&job, e).await => {
                 // Deleted meanwhile (review 46 I2): left out like the list would, header not written.
@@ -631,6 +654,28 @@ async fn produce(job: Job, pacer: &mut Pacer) -> Result<(), Stop> {
     };
     pacer.frames(&end).await?;
     pacer.send(Msg::Done).await
+}
+
+/// Starts the deadline-bound producer. The response can stop promptly while a detached blob read
+/// retains its share of capacity until the storage operation finishes.
+fn spawn_producer(
+    job: Job,
+    mut pacer: Pacer,
+    deadline: Instant,
+    capacity: Arc<Capacity>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let count = job.entries.len();
+        match tokio::time::timeout_at(deadline, produce(job, &mut pacer, capacity)).await {
+            Ok(Ok(()) | Err(Stop::Gone | Stop::Failed)) => {}
+            Ok(Err(Stop::Slow)) => {
+                tracing::warn!(entries = count, "bulk download reader too slow, aborted");
+            }
+            Err(_) => {
+                tracing::warn!(entries = count, "bulk download deadline exceeded, aborted");
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -748,7 +793,7 @@ pub(crate) async fn download_bulk(
     let deadline = Instant::now() + state.limits.deadline(total);
     let (tx, rx) = mpsc::channel(QUEUE_FRAMES);
     let taken = Arc::new(AtomicU64::new(0));
-    let mut pacer = Pacer::new(tx, Arc::clone(&taken), &state.limits);
+    let pacer = Pacer::new(tx, Arc::clone(&taken), &state.limits);
     let job = Job {
         store: Arc::clone(&st.deps.store),
         db: st.deps.db.clone(),
@@ -756,22 +801,13 @@ pub(crate) async fn download_bulk(
         entries,
         dos: dos_time_date(now),
     };
-    // The detached producer owns both permits and the account's running slot until it ends, so a
-    // client disconnect cannot free them while a blob read is still running. Ending without the
-    // end marker (dropping the sender) aborts the response.
-    tokio::spawn(async move {
-        let _held: (OwnedSemaphorePermit, OwnedSemaphorePermit, Running) = (permit, bulk, running);
-        match tokio::time::timeout_at(deadline, produce(job, &mut pacer)).await {
-            Ok(Ok(()) | Err(Stop::Gone | Stop::Failed)) => {}
-            Ok(Err(Stop::Slow)) => {
-                tracing::warn!(entries = count, "bulk download reader too slow, aborted");
-            }
-            Err(_) => {
-                // I5: the count helps tell a slow client from a short (understated) deadline.
-                tracing::warn!(entries = count, "bulk download deadline exceeded, aborted");
-            }
-        }
+    let capacity = Arc::new(Capacity {
+        _download: permit,
+        _bulk: bulk,
+        _running: running,
     });
+    // Ending without the end marker (dropping the sender) aborts the response.
+    spawn_producer(job, pacer, deadline, capacity);
     zip_response(
         BulkBody {
             rx: Some(rx),
@@ -803,6 +839,166 @@ fn zip_response(body: BulkBody, cd: HeaderValue) -> Response {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// Models `FsStore`'s non-cancellable blocking read. Dropping the release sender also unblocks
+    /// it, so a failing assertion cannot strand the test runtime during shutdown.
+    struct GatedRead {
+        started: Arc<tokio::sync::Notify>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl NzbStore for GatedRead {
+        async fn put(
+            &self,
+            _sha: Sha256,
+            _bytes: &[u8],
+        ) -> Result<nzb_store::PutOutcome, StoreError> {
+            unreachable!("download must not write the store")
+        }
+
+        async fn get(&self, _sha: &Sha256) -> Result<Vec<u8>, StoreError> {
+            let release = self.release.lock().unwrap().take();
+            let started = Arc::clone(&self.started);
+            let finished = Arc::clone(&self.finished);
+            tokio::task::spawn_blocking(move || {
+                if let Some(release) = release {
+                    started.notify_one();
+                    let _ = release.recv_timeout(Duration::from_secs(10));
+                }
+                finished.store(true, Ordering::SeqCst);
+                Ok(b"verified NZB bytes".to_vec())
+            })
+            .await
+            .unwrap()
+        }
+
+        async fn exists(&self, _sha: &Sha256) -> Result<bool, StoreError> {
+            unreachable!("download must read the blob directly")
+        }
+
+        async fn delete(&self, _sha: &Sha256) -> Result<(), StoreError> {
+            unreachable!("download must not delete from the store")
+        }
+    }
+
+    fn test_session() -> SessionCtx {
+        SessionCtx {
+            user_id: 17,
+            stage: nzb_store::SessionStage::Active,
+            csrf_token: String::new(),
+            hidden_categories: Arc::from([]),
+            prefs: nzb_store::UserPrefs::default(),
+            role: nzb_store::Role::Viewer,
+            username: "reader".to_owned(),
+            display_name: "Reader".to_owned(),
+            enroll_proven: false,
+            multi_user: false,
+            id_hash: [0; 32],
+            last_seen_at: 0,
+            created_at: 0,
+            library_gen: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn bulk_timeout_keeps_capacity_until_the_blocking_read_finishes() {
+        use http_body_util::BodyExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let clock = Arc::new(crate::auth::ManualWallClock::new(0));
+        let limits = BulkLimits::default();
+        let state = Arc::new(BulkState::new(limits, clock));
+        let shared = Arc::new(Semaphore::new(1));
+        let (release, blocked) = std::sync::mpsc::channel();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store: Arc<dyn NzbStore> = Arc::new(GatedRead {
+            started: Arc::clone(&started),
+            release: Mutex::new(Some(blocked)),
+            finished: Arc::clone(&finished),
+        });
+        let job = || Job {
+            store: Arc::clone(&store),
+            db: db.store.clone(),
+            sess: test_session(),
+            entries: vec![Entry {
+                id: 1,
+                sha: Sha256([1; 32]),
+                name: "release.nzb".to_owned(),
+            }],
+            dos: dos_time_date(0),
+        };
+        let claim = || {
+            Arc::new(Capacity {
+                _download: Arc::clone(&shared).try_acquire_owned().unwrap(),
+                _bulk: Arc::clone(&state.pool).try_acquire_owned().unwrap(),
+                _running: Running::claim(&state, 17).unwrap(),
+            })
+        };
+        let (tx, rx) = mpsc::channel(QUEUE_FRAMES);
+        let taken = Arc::new(AtomicU64::new(0));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let producer = spawn_producer(
+            job(),
+            Pacer::new(tx, Arc::clone(&taken), &limits),
+            deadline,
+            claim(),
+        );
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        let mut body = BulkBody {
+            rx: Some(rx),
+            deadline: Box::pin(tokio::time::sleep_until(deadline)),
+            taken,
+        };
+        assert!(
+            body.frame().await.unwrap().is_err(),
+            "response must time out"
+        );
+        tokio::time::timeout(Duration::from_secs(2), producer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!finished.load(Ordering::SeqCst), "the I/O is still blocked");
+        assert!(Running::claim(&state, 17).is_none());
+        assert!(Arc::clone(&state.pool).try_acquire_owned().is_err());
+        assert!(Arc::clone(&shared).try_acquire_owned().is_err());
+
+        release.send(()).unwrap();
+        let returned =
+            tokio::time::timeout(Duration::from_secs(2), Arc::clone(&shared).acquire_owned())
+                .await
+                .unwrap()
+                .unwrap();
+        drop(returned);
+        assert!(finished.load(Ordering::SeqCst));
+        assert_eq!(state.pool.available_permits(), 1);
+        // A new archive now claims the same account and both pools and finishes normally.
+        let (tx, rx) = mpsc::channel(QUEUE_FRAMES);
+        let taken = Arc::new(AtomicU64::new(0));
+        let producer = spawn_producer(
+            job(),
+            Pacer::new(tx, taken, &limits),
+            Instant::now() + Duration::from_secs(2),
+            claim(),
+        );
+        let bytes = body_with(rx, Duration::from_secs(2))
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        producer.await.unwrap();
+        assert_eq!(u32_at(&bytes, 0), LOCAL_SIG);
+        assert_eq!(u32_at(&bytes, bytes.len() - 22), END_SIG);
+        assert_eq!(shared.available_permits(), 1);
+        assert_eq!(state.pool.available_permits(), 1);
+        assert!(Running::claim(&state, 17).is_some());
+    }
 
     fn u16_at(b: &[u8], at: usize) -> u16 {
         u16::from_le_bytes([b[at], b[at + 1]])

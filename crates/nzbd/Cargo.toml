@@ -39,6 +39,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 zeroize = "1.9.1"
 
 [dev-dependencies]
+# Generate the legacy SQLite fixture from its committed migrations during tests.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
 # Digests of the NZB fixtures written by the `nzbd import` test (already in the lockfile via nzb-ingest).
 sha2 = "0.10"
 # The Postgres test harness (`nzb_store::pg::testing`): library identity and backend tests on both backends (T122).

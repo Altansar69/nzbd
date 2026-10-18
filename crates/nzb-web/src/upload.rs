@@ -99,9 +99,6 @@ pub struct UploadDeps {
     pub storage: Option<Arc<StorageGuard>>,
     /// Audit sink for `nzb_upload*` rows (T138); `None` writes none (stand-alone tests).
     pub audit: Option<(Store, Arc<dyn WallClock>)>,
-    /// Categories the instance hides (`ui.show_xxx = false`): refused as an API hint, like a
-    /// typo. A release stored there could be neither seen nor deleted from the UI.
-    pub hidden_categories: Arc<[u16]>,
 }
 
 impl UploadDeps {
@@ -131,7 +128,6 @@ impl UploadDeps {
             slots: Arc::new(Semaphore::new(DEFAULT_UPLOAD_CONCURRENCY)),
             storage: None,
             audit: None,
-            hidden_categories: Arc::from(Vec::new()),
         }
     }
 
@@ -756,7 +752,8 @@ async fn read_parts(
     deadline: Instant,
     items: &mut Vec<Item>,
 ) -> Result<(), Rejected> {
-    let mut hidden: Arc<[u16]> = Arc::clone(&deps.hidden_categories);
+    // Hiding categories is a UI display rule; API ingestion still accepts every taxonomy id.
+    let mut hidden: Arc<[u16]> = Arc::from(Vec::new());
     let (api, mut hint, mut label, mut csrf_pending, mut charges, ui_user, audit_user, audit_ip) =
         match mode {
             Mode::Api {
@@ -1024,7 +1021,7 @@ async fn api_inner(
     let hint = match req.headers().get("x-category") {
         None => None,
         Some(v) => match v.to_str() {
-            Ok(t) => resolve_hint(&deps.taxonomy, &deps.hidden_categories, t).map_err(reject)?,
+            Ok(t) => resolve_hint(&deps.taxonomy, &[], t).map_err(reject)?,
             Err(_) => return Err(reject(INVALID_CATEGORY)),
         },
     };

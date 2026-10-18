@@ -3,13 +3,13 @@
 
 use sqlx::Row;
 
-use crate::account::{AuditActor, Role};
+use crate::account::{AccountActor, AuditActor, Role};
 use crate::apikey::{
     Actor, ApiKeyAuth, ApiKeyRow, CreateKey, MAX_ACTIVE_KEYS_INSTANCE, MAX_RATE_PER_MIN, NewApiKey,
     sanitize_label,
 };
 use crate::pg::PgDb;
-use crate::pg::account::{require_actor, write_audit};
+use crate::pg::account::{require_actor, require_session_actor, write_audit};
 use crate::{AccountError, StoreError};
 
 /// Validates an optional per-key budget.
@@ -190,7 +190,7 @@ impl PgDb {
             .await
             .map_err(|_| StoreError::from(AccountError::Forbidden))?;
         if let Some(h) = session_hash
-            && !crate::pg::auth::session_is_live(&mut tx, h, owner_id).await?
+            && !crate::pg::auth::session_is_live(&mut tx, h, owner_id, now).await?
         {
             return Err(StoreError::NotFound);
         }
@@ -371,22 +371,23 @@ impl PgDb {
 
     /// Revokes one active key on behalf of a signed-in account (T103): the OWNER may revoke its own
     /// keys, an ADMIN any key. The actor is re-validated inside the transaction (live, enabled, at least
-    /// uploader) and the key's owner is read in the same transaction. Returns `false` when the key does not
+    /// uploader, with its calling session still active) and the key's owner is read in the same transaction.
+    /// Returns `false` when the key does not
     /// exist, was revoked already, or belongs to someone else and the actor is not an admin: the three
     /// cases are indistinguishable to the caller. An admin acting on another account's key is attributed
     /// with the owner as `target_id`.
     ///
     /// # Errors
-    /// [`AccountError::Forbidden`] when the actor is no longer a live, enabled uploader or admin.
+    /// [`AccountError::Forbidden`] when the actor or its calling session is no longer usable.
     pub async fn revoke_api_key_by(
         &self,
-        actor_id: i64,
+        actor: &AccountActor,
         id: i64,
         ip: Option<&str>,
         now: i64,
     ) -> Result<bool, StoreError> {
         let mut tx = self.begin_account().await?;
-        let a = require_actor(&mut tx, actor_id, Role::Uploader).await?;
+        let a = require_session_actor(&mut tx, actor, Role::Uploader, now).await?;
         let owner: Option<Option<i64>> =
             sqlx::query_scalar("SELECT owner_id FROM api_key WHERE id = $1 AND revoked_at IS NULL")
                 .bind(id)

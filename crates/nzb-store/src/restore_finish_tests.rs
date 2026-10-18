@@ -252,3 +252,49 @@ async fn sec_068_restoring_an_older_backup_then_finishing_keeps_a_revoked_key_re
     assert!(restored.find_api_key(&hash).await.unwrap().unwrap().revoked);
     assert!(chain_ok(&restored).await);
 }
+
+/// This is the mark consumed by nzbd's open/admit gates; their file-copy integration test lives in library.rs.
+#[tokio::test]
+async fn sec_068_serve_refuses_a_restored_database_until_restore_finish() {
+    let e = env().await;
+    e.admin("root").await;
+    let uploader = e.uploader("mem").await;
+    let (_, hash) = e.key(uploader, 4).await;
+    assert!(!e.db.restore_pending().await.unwrap());
+    let backups = e.dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+    let snap = e.db.backup(&backups, T0, 3).await.unwrap();
+    let restored = SqliteDb::open(&DbConfig { path: snap.path }).await.unwrap();
+    assert!(restored.restore_pending().await.unwrap());
+    restored.restore_finish(T0 + 1, true).await.unwrap();
+    assert!(
+        restored.restore_pending().await.unwrap(),
+        "a dry run cannot admit restored credentials"
+    );
+    assert!(!restored.find_api_key(&hash).await.unwrap().unwrap().revoked);
+    restored.restore_finish(T0 + 2, false).await.unwrap();
+    assert!(!restored.restore_pending().await.unwrap());
+    assert!(restored.find_api_key(&hash).await.unwrap().unwrap().revoked);
+}
+
+#[tokio::test]
+async fn sec_068_restore_finish_rotates_the_index_epoch() {
+    let e = env().await;
+    let before = e.db.search_epoch().await.unwrap();
+    assert_eq!(before.len(), 16);
+    e.db.restore_finish(T0 + 1, true).await.unwrap();
+    assert_eq!(
+        e.db.search_epoch().await.unwrap(),
+        before,
+        "a dry run rotates nothing"
+    );
+    e.db.restore_finish(T0 + 2, false).await.unwrap();
+    let after = e.db.search_epoch().await.unwrap();
+    assert_ne!(after, before);
+    e.db.restore_finish(T0 + 3, false).await.unwrap();
+    assert_ne!(
+        e.db.search_epoch().await.unwrap(),
+        after,
+        "every run rotates"
+    );
+}

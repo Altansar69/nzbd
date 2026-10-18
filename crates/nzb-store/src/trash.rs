@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use async_trait::async_trait;
 use nzb_core::Sha256;
@@ -359,6 +359,15 @@ pub struct QuarantinePurge {
     /// Entries refused by the safety checks (symlink, hard-linked, swapped, not regular) and
     /// foreign names.
     pub skipped: u64,
+    /// Managed files left because the deadline or authority gate stopped the purge.
+    pub remaining: u64,
+    /// The authority gate refused; no subsequent file was removed.
+    pub aborted: bool,
+}
+
+impl QuarantinePurge {
+    /// Maximum number of managed entries between authority checks.
+    pub const BATCH_SIZE: u64 = 50;
 }
 
 /// Result of [`TrashStore::trash_purge`].
@@ -428,5 +437,17 @@ pub trait TrashStore: NzbStore {
     async fn quarantine_list(&self, limit: usize) -> Result<QuarantineListing, StoreError>;
 
     /// Removes quarantined files whose quarantine time is before `older_than` (unix seconds).
-    async fn quarantine_purge(&self, older_than: i64) -> Result<QuarantinePurge, StoreError>;
+    async fn quarantine_purge(&self, older_than: i64) -> Result<QuarantinePurge, StoreError> {
+        self.quarantine_purge_checked(older_than, None, None).await
+    }
+
+    /// A bounded purge: check the deadline before removal and the authority gate on a blocking
+    /// thread before every [`QuarantinePurge::BATCH_SIZE`] entries, including the first batch.
+    /// A false gate stops the run; implementations must not fall back to an unchecked purge.
+    async fn quarantine_purge_checked(
+        &self,
+        older_than: i64,
+        deadline: Option<Instant>,
+        gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Result<QuarantinePurge, StoreError>;
 }

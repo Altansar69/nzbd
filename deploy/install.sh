@@ -574,7 +574,7 @@ if [ -f .env ]; then
 fi
 
 MODE=bundled; EXT_NAME=""; EXT_KIND=""; GENERATED=0
-NETMODE=join; NETNAME=""; TEP=websecure; TRES=""; LOGIN_USER=""
+NETMODE="join"; NETNAME=""; TEP=websecure; TRES=""; LOGIN_USER=""
 if [ "$write_env" = 1 ]; then
   say "Press Enter to accept the value in brackets."
   ask SITE "Host name your browsers will use (lowercase, no port)" "nzbd.lan"
@@ -596,7 +596,7 @@ if [ "$write_env" = 1 ]; then
     say "No running proxy-like container (Traefik, nginx, Caddy, HAProxy) was found on this host."
   fi
   say "Answer no to install the bundled Caddy proxy instead (HTTPS with its own CA + a login)."
-  PUSER=admin; BIND=127.0.0.1; PORT=443; HASH=unused
+  PUSER="admin"; BIND=127.0.0.1; PORT=443; HASH=unused
   if yesno "Do you already run a reverse proxy in Docker and want nzbd behind it?" "$hasproxy"; then
     MODE=external
     if [ -n "$cands" ]; then
@@ -667,7 +667,7 @@ if [ "$write_env" = 1 ]; then
         docker network inspect "$NETNAME" >/dev/null 2>&1 || die "no Docker network named '$NETNAME'. Start your proxy stack first so it exists (a network 'proxy' in a compose project 'traefik' is named 'traefik_proxy' unless it sets 'name:'), then re-run."
         shared_network_ok "$NETNAME" || die "aborted."
         ;;
-      *) NETMODE=join ;;
+      *) NETMODE="join" ;;
     esac
     case "$NETNAME" in *[!A-Za-z0-9._-]*) die "invalid network name." ;; esac
     if [ "$EXT_KIND" = traefik ] && [ "$NETMODE" != join ]; then
@@ -1357,7 +1357,7 @@ if [ "$MODE" = external ]; then
   [ -z "$PIP" ] || say "     (the fixed address is the one nzbd trusts for X-Forwarded-For / X-Forwarded-Proto)"
   say
   say "  3. Your proxy must: serve https://$SITE/, forward the Host header unchanged, set X-Forwarded-For (client address)"
-  say "     and X-Forwarded-Proto https, accept 65 MiB bodies on /upload and /api/v1/nzb, and (advised) answer 404"
+  say "     and X-Forwarded-Proto https, accept 321 MiB bodies on /upload and 65 MiB on /api/v1/nzb, and (advised) answer 404"
   say "     for /healthz from outside."
   say
   case "$EXT_KIND" in
@@ -1367,12 +1367,16 @@ if [ "$MODE" = external ]; then
        server {
          listen 443 ssl;  server_name $SITE;   # + your ssl_certificate lines
          client_max_body_size 65m;
+         proxy_set_header Host \$http_host;
+         proxy_set_header X-Forwarded-For \$remote_addr;
+         proxy_set_header X-Forwarded-Proto \$scheme;
          location = /healthz { return 404; }
+         location = /upload {
+           client_max_body_size 321m;
+           proxy_pass http://nzbd:8080;
+         }
          location / {
            proxy_pass http://nzbd:8080;
-           proxy_set_header Host \$host;
-           proxy_set_header X-Forwarded-For \$remote_addr;
-           proxy_set_header X-Forwarded-Proto \$scheme;
          }
        }
 NGINX
@@ -1383,7 +1387,14 @@ NGINX
        $SITE {
          @h path /healthz
          respond @h 404
-         request_body { max_size 65MiB }
+         @ui_upload path /upload
+         request_body @ui_upload {
+           max_size 321MiB
+         }
+         @other not path /upload
+         request_body @other {
+           max_size 65MiB
+         }
          reverse_proxy nzbd:8080 {
            header_up X-Forwarded-For {remote_host}
            header_up X-Forwarded-Proto {scheme}

@@ -243,19 +243,20 @@ button, a.button {
   border: var(--bw) solid var(--line); border-radius: var(--radius);
   background: var(--bg); color: var(--fg); cursor: pointer; text-decoration: none;
 }
-button:hover { background: var(--hover); }
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
 button[type="submit"] { font-weight: 600; }
 a.button { background: var(--accent); border-color: var(--accent); color: var(--on-accent); padding: var(--sp-2) var(--sp-4); font-weight: 700; }
 a.button:hover { text-decoration: underline; }
 /* Destructive actions: danger fill plus the text label (colour is never the only cue). */
 button.danger, a.button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); font-weight: 700; }
 button.danger:hover, a.button.danger:hover { background: var(--bad); text-decoration: underline; }
-input[type="text"], input[type="password"], input[type="search"], input[type="date"], select {
+input[type="text"], input[type="email"], input[type="password"], input[type="search"], input[type="date"], select {
   font: inherit; max-width: 100%; padding: var(--sp-1) var(--sp-2);
   border: var(--bw) solid var(--line); border-radius: var(--radius);
   background: var(--bg); color: var(--fg);
 }
-input[type="text"], input[type="password"] { width: 100%; }
+input[type="text"], input[type="email"], input[type="password"] { width: 100%; }
 label { font-weight: 600; font-size: 0.92rem; }
 .checks label { font-weight: 400; }
 input[type="checkbox"], input[type="radio"] { width: 1rem; height: 1rem; accent-color: var(--accent); }
@@ -346,6 +347,8 @@ table.results td.cat .badge { white-space: nowrap; }
 table.results td.src .ell { display: block; max-width: 11rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 table.results td.num .meter { width: 100%; min-width: 4rem; height: 0.35rem; margin-top: 2px; }
 table.results th, table.results td { padding-top: var(--sp-1); padding-bottom: var(--sp-1); }
+table.results th[aria-sort="ascending"] a::after { content: " \2191"; }
+table.results th[aria-sort="descending"] a::after { content: " \2193"; }
 table.results .tags { display: flex; flex-wrap: wrap; gap: 2px var(--sp-1); margin-top: 2px; }
 table.results .tags .badge { font-size: 0.78rem; line-height: 1.35; padding: 0 var(--sp-1); font-weight: 400; }
 /* Other tables: id/number/time columns hug their content, text columns take the rest. */
@@ -414,7 +417,14 @@ ol.codes code { font-size: 1.05rem; word-break: normal; }
    fixed data-label attributes in templates/index.html. */
 @media (max-width: 48rem) {
   table.results, table.results tbody, table.results tr, table.results th, table.results td { display: block; width: 100%; }
-  table.results thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  /* Sorting and select-all remain visible and operable when rows turn into cards. */
+  table.results thead { display: block; }
+  table.results thead tr { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); padding: var(--sp-2); }
+  table.results thead th { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  table.results thead th:is(.c-sel, .c-title, .c-posted, .c-size) { position: static; width: auto; height: auto; overflow: visible; clip-path: none; padding: 0; border: 0; background: transparent; }
+  table.results thead a { display: inline-flex; align-items: center; min-height: 2.5rem; padding: 0 var(--sp-2); }
+  table.results .select-all-control:not([hidden]) { display: inline-flex; align-items: center; gap: var(--sp-2); min-height: 2.5rem; }
+  table.results .select-all-text { position: static; width: auto; height: auto; overflow: visible; clip-path: none; white-space: normal; }
   table.results tr { padding: var(--sp-2) 0; border-bottom: var(--bw) solid var(--line); }
   table.results tbody tr:last-child { border-bottom: 0; }
   table.results th.title { min-width: 0; border-bottom: 0; }
@@ -496,6 +506,7 @@ table.results a.dl:hover { background: var(--hover); text-decoration: underline;
   table.results a.dl { padding: 0 var(--sp-1); }
 }
 @media (max-width: 48rem) {
+  table.results td.num, table.results td.c-sel, table.results td.c-dl { width: 100%; }
   table.results td.c-sel::before, table.results td.c-dl::before { content: none; }
   table.results a.dl { min-height: 2.25rem; display: inline-flex; align-items: center; padding: 0 var(--sp-3); }
 }

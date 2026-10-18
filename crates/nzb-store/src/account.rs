@@ -564,10 +564,11 @@ pub(crate) async fn require_session_actor(
     conn: &mut SqliteConnection,
     actor: &AccountActor,
     min: Role,
+    now: i64,
 ) -> Result<Subject, StoreError> {
     let s = require_actor(conn, actor.user_id, min).await?;
     if let Some(h) = &actor.session
-        && !crate::auth::session_is_live(conn, h, actor.user_id).await?
+        && !crate::auth::session_is_live(conn, h, actor.user_id, now).await?
     {
         return Err(AccountError::Forbidden.into());
     }
@@ -1034,14 +1035,18 @@ struct Resolved {
     actor_id: Option<i64>,
 }
 
-async fn resolve(conn: &mut SqliteConnection, init: Initiator<'_>) -> Result<Resolved, StoreError> {
+async fn resolve(
+    conn: &mut SqliteConnection,
+    init: Initiator<'_>,
+    now: i64,
+) -> Result<Resolved, StoreError> {
     match init {
         Initiator::Operator => Ok(Resolved {
             who: AuditActor::cli(),
             actor_id: None,
         }),
         Initiator::Account(a) => {
-            let s = require_session_actor(conn, a, Role::Admin).await?;
+            let s = require_session_actor(conn, a, Role::Admin, now).await?;
             Ok(Resolved {
                 who: AuditActor::account(s.id, s.role, &s.username),
                 actor_id: Some(s.id),
@@ -1509,7 +1514,7 @@ impl SqliteDb {
         now: i64,
     ) -> Result<u64, StoreError> {
         let mut tx = self.begin_immediate().await?;
-        let res = resolve(&mut tx, init).await?;
+        let res = resolve(&mut tx, init, now).await?;
         let target = load_live(&mut tx, target_id)
             .await?
             .ok_or(AccountError::TargetNotFound)?;
@@ -1722,7 +1727,7 @@ impl SqliteDb {
             return Err(AccountError::InvalidDisplayName.into());
         }
         let mut tx = self.begin_immediate().await?;
-        let res = resolve(&mut tx, init).await?;
+        let res = resolve(&mut tx, init, now).await?;
         let target = load_live(&mut tx, target_id)
             .await?
             .ok_or(AccountError::TargetNotFound)?;

@@ -7,7 +7,8 @@
 <li class="tile"><span class="glyph" aria-hidden="true">&#9707;</span><span class="num">{{ t.size }}</span><span class="lbl">Total size</span></li>
 {% if show_incomplete %}<li class="tile"><span class="glyph" aria-hidden="true">&#9888;</span><span class="num">{{ t.incomplete }}</span><span class="lbl">Incomplete</span></li>
 {% endif %}</ul>
-{% endif %}<section class="card searchcard" aria-label="Filters">
+{% endif %}<div id="results" hx-target="#results" hx-select="#results" hx-swap="outerHTML">
+<section class="card searchcard" aria-label="Filters">
 <form class="filters" method="get" action="/" role="search" aria-label="Search and filter releases">
 <p class="row"><label for="q" class="sr">Search</label>
 <input id="q" name="q" type="search" value="{% if let Some(v) = p.q %}{{ v }}{% endif %}" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Search releases">
@@ -66,18 +67,19 @@
 <p><a href="{{ clear_href }}">Clear filters</a></p></section>
 {% else %}
 <section class="card empty" role="status"><p><strong>No releases yet.</strong></p>
-<p class="muted">Drop <code>.nzb</code> files into the watch folder or <a href="/upload">upload one</a>.</p></section>
+<p class="muted">{% if layout.can_upload %}Drop <code>.nzb</code> files into the watch folder or <a href="/upload">upload one</a>.{% else %}An uploader or administrator can add NZB files to the library.{% endif %}</p></section>
 {% endif %}
 {% else %}
-<div id="results" hx-target="#results" hx-select="#results" hx-swap="outerHTML">
 <p class="muted" role="status">{% if degraded %}Showing {{ first }}-{{ last }} of {{ total_text }} releases, newest first (page {{ page }}).{% else if approx %}Showing {{ first }}-{{ last }} of more than {{ total_text }} releases (page {{ page }}).{% else %}Showing {{ first }}-{{ last }} of {{ total_text }} releases (page {{ page }} of {{ pages }}).{% endif %}</p>
-{% if let Some(b) = bulk %}<form method="post" action="{% if b.edit %}/releases/bulk{% else %}/releases/bulk/download{% endif %}" id="bulk" class="bulk" aria-label="Actions on the selected releases">
+{% if let Some(b) = bulk %}<form method="post" action="{% if b.edit %}/releases/bulk{% else %}/releases/bulk/download{% endif %}" id="bulk" class="bulk selection-form" aria-label="Actions on the selected releases" aria-describedby="bulk-selection-help">
 {% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
+{% endif %}{% if b.edit %}{# Block implicit Source submission without JS. Checkbox Enter can skip this, so Download comes first. #}
+<input type="submit" hidden disabled>
 {% endif %}{% endif %}<div tabindex="0" class="tablewrap">
 <table class="results">
 <caption class="sr">Releases</caption>
 <thead hx-boost="true"><tr>
-{% if bulk.is_some() %}<th scope="col" class="c-sel"><span class="sr">Select</span><input type="checkbox" class="select-all" aria-label="Select all releases on this page" hidden></th>
+{% if bulk.is_some() %}<th scope="col" class="c-sel"><span class="sr">Select</span><label class="select-all-control" hidden><input type="checkbox" class="select-all" aria-label="Select all releases on this page" hidden><span class="sr select-all-text">Select all</span></label></th>
 {% endif %}<th scope="col" class="c-title" aria-sort="{{ title_head.aria }}"><a href="{{ title_head.href }}">{{ title_head.label }}</a></th>
 <th scope="col" class="c-cat">Category</th>
 <th scope="col" class="c-posted" aria-sort="{{ date_head.aria }}"><a href="{{ date_head.href }}">{{ date_head.label }}</a></th>
@@ -102,15 +104,16 @@
 </div>
 {% if let Some(b) = bulk %}<fieldset class="bulkbar">
 <legend>With the selected releases</legend>
+<p id="bulk-selection-help" class="muted">Select at least one release above, then choose an action button.</p>
+<p class="row"><button type="submit" formaction="/releases/bulk/download" class="dlsel">Download selected (.zip)</button>
+<span class="muted">One .zip file with an .nzb per release, up to 1 GiB.</span></p>
 {% if b.edit %}<p class="row"><label for="bulk-cat">Category</label>
 <select id="bulk-cat" name="category"><option value="">Choose a category</option>{% for c in categories %}<option value="{{ c.value }}">{{ c.label }}</option>{% endfor %}</select>
 <button type="submit" name="action" value="category">Set category</button></p>
 <p class="row"><label for="bulk-source">Source label</label>
 <input id="bulk-source" name="source" type="text" maxlength="200" autocomplete="off" placeholder="empty clears the label">
 <button type="submit" name="action" value="source">Set source</button></p>
-{% endif %}<p class="row"><button type="submit" formaction="/releases/bulk/download" class="dlsel">Download selected (.zip)</button>
-<span class="muted">One .zip file with an .nzb per release, up to 1 GiB.</span></p>
-{% if b.delete %}<p class="row"><button type="submit" formaction="/releases/bulk/delete/confirm" class="danger">Delete selected...</button>
+{% endif %}{% if b.delete %}<p class="row"><button type="submit" formaction="/releases/bulk/delete/confirm" class="danger">Delete selected...</button>
 <span class="muted">Up to {{ b.max }} per action; deleting asks for confirmation, your password and a code.</span></p>
 {% else %}<p class="row muted">Up to {{ b.max }} per action.</p>
 {% endif %}</fieldset>
@@ -132,8 +135,8 @@
 <button type="submit">Show</button>
 </form>
 </div>
-</div>
 {% endif %}
+</div>
 {% if !filtered && !ticks.is_empty() %}<section class="card" aria-labelledby="latest-h">
 <h2 id="latest-h">Latest ingests</h2>
 <ol class="timeline plain">

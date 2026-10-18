@@ -1854,3 +1854,133 @@ impl IngestHandle {
         self.tx.max_capacity().saturating_sub(self.tx.capacity())
     }
 }
+
+#[cfg(test)]
+mod retry_capacity_tests {
+    #![allow(clippy::unwrap_used, clippy::too_many_lines)]
+
+    use super::*;
+
+    struct FixedClock;
+
+    impl WallClock for FixedClock {
+        fn now_unix(&self) -> i64 {
+            1_700_000_000
+        }
+    }
+
+    #[tokio::test]
+    async fn panic_tracker_saturation_quarantines_overflow_without_resetting_existing_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            path
+        };
+        let watch = directory("watch");
+        let failed = directory("failed");
+        let duplicates = directory("duplicates");
+        let store_root = directory("store");
+        let test_store = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let pipeline = Pipeline::new(
+            PipelineConfig {
+                limits: Limits::default(),
+                watch_dir: watch.clone(),
+                failed_dir: failed.clone(),
+                duplicates_dir: duplicates,
+                duplicates_action: DuplicatesAction::Move,
+                category_from_subfolder: false,
+                failed_uploads_max_files: 0,
+                failed_uploads_max_bytes: 0,
+            },
+            test_store.store.clone(),
+            Arc::new(nzb_store::FsStore::open(&store_root).unwrap()),
+            Arc::new(FixedClock),
+        )
+        .unwrap();
+        let tracked = watch.join("tracked-0.nzb");
+        let overflow = watch.join("overflow.nzb");
+        std::fs::write(&tracked, b"original tracked file").unwrap();
+        std::fs::write(&overflow, b"original overflow file").unwrap();
+        // Seed only the prior observations, then exercise real failure logging and moving.
+        // Thousands of actual panics/SQL writes would add runtime without testing another path.
+        pipeline.attempts_mut(|attempts| {
+            for n in 0..MAX_TRACKED_PATHS {
+                attempts.insert(
+                    watch.join(format!("tracked-{n}.nzb")),
+                    Attempts {
+                        retries: 0,
+                        panics: 1,
+                    },
+                );
+            }
+        });
+        let meta = |path: &Path| JobMeta {
+            source: LogSource::Watch,
+            source_name: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            api_key_id: None,
+            uploader: Uploader::Unattributed,
+            path: Some(path.to_path_buf()),
+            staged: false,
+            import: false,
+        };
+        let error = pipeline.fail_panicked(&meta(&overflow), None, None).await;
+        assert_eq!(error.code(), "INTERNAL");
+        assert!(
+            !overflow.exists(),
+            "an untrackable panic must be quarantined immediately"
+        );
+        assert!(
+            tracked.exists(),
+            "existing paths retain their retry allowance"
+        );
+        pipeline.attempts_mut(|attempts| {
+            assert_eq!(attempts.len(), MAX_TRACKED_PATHS);
+            assert_eq!(attempts.get(&tracked).unwrap().panics, 1);
+            assert!(!attempts.contains_key(&overflow));
+        });
+
+        // A retry-only entry can temporarily cross the cap; pruning it must not erase the
+        // panic counters or let an already tracked file start its three attempts over.
+        let retry = watch.join("retry-only.nzb");
+        pipeline.attempts_mut(|attempts| {
+            attempts.insert(
+                retry.clone(),
+                Attempts {
+                    retries: 1,
+                    panics: 0,
+                },
+            );
+        });
+        pipeline.fail_panicked(&meta(&tracked), None, None).await;
+        assert!(tracked.exists());
+        pipeline.attempts_mut(|attempts| {
+            assert_eq!(attempts.len(), MAX_TRACKED_PATHS);
+            assert_eq!(attempts.get(&tracked).unwrap().panics, 2);
+            assert!(!attempts.contains_key(&retry));
+        });
+        pipeline.fail_panicked(&meta(&tracked), None, None).await;
+        assert!(
+            !tracked.exists(),
+            "the third tracked panic still quarantines"
+        );
+        pipeline.attempts_mut(|attempts| {
+            assert_eq!(attempts.len(), MAX_TRACKED_PATHS - 1);
+            assert!(attempts.values().all(|a| a.panics == 1));
+        });
+        let entries = failure::list_failed(&failed).unwrap();
+        assert_eq!(entries.len(), 2);
+        for entry in entries {
+            let reason = entry.reason.unwrap();
+            assert_eq!(reason.error_code, "INTERNAL");
+            let expected: &[u8] = if reason.source_name.as_deref() == Some("overflow.nzb") {
+                b"original overflow file"
+            } else {
+                assert_eq!(reason.source_name.as_deref(), Some("tracked-0.nzb"));
+                b"original tracked file"
+            };
+            assert_eq!(std::fs::read(failed.join(entry.name)).unwrap(), expected);
+        }
+        assert_eq!(pipeline.stats().failed, 3);
+    }
+}

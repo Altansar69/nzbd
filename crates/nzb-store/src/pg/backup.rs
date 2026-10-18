@@ -671,7 +671,7 @@ pub(crate) async fn restore_inner(
         let p = scratch.join(".nzbd-restore.plain.tmp");
         // Leftovers of a crashed restore (authenticated plaintext; `SECURITY_REVIEW` 31 I4) are removed first.
         let _ = fs::remove_file(&p);
-        let _ = fs::remove_file(scratch.join(".nzbd-restore.plain.tmp.decrypt.tmp"));
+        let _ = fs::remove_file(scratch.join("..nzbd-restore.plain.tmp.decrypt.tmp"));
         backup_crypto::decrypt_file(key, file, &p).map_err(crypto_err)?;
         plain_tmp = Some(p.clone());
         p

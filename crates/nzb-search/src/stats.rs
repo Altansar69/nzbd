@@ -262,46 +262,41 @@ impl Agg for StrCount {
         let Some(col) = self.col.take() else {
             return Ok(());
         };
-        // One ascending stream over the dictionary blocks for the ordinals that were counted (each block is decoded
-        // once), not one random lookup per ordinal; the deadline is checked every few terms (review 47 M1).
+        // Tantivy 0.27's dictionary callback cannot stop early. Resolve bounded, ascending
+        // batches instead so the deadline still interrupts a large merge (including sparse counts).
         let per_ord = &self.per_ord;
         let by_value = &mut self.by_value;
         let cap = self.cap;
         let capped = &mut self.capped;
-        let every = check_every.clamp(1, MERGE_CHECK_EVERY);
-        let mut counts = per_ord.iter().copied().filter(|n| *n > 0);
-        let ords = per_ord
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| **n > 0)
-            .filter_map(|(o, _)| u64::try_from(o).ok());
-        let mut seen = 0u64;
-        let mut expired = false;
-        let streamed = col.dictionary().sorted_ords_to_term_cb(ords, |bytes| {
-            seen = seen.saturating_add(1);
-            if seen.is_multiple_of(every) && deadline.expired() {
-                expired = true;
-                return Err(std::io::Error::other("statistics deadline"));
+        let every = usize::try_from(check_every.clamp(1, MERGE_CHECK_EVERY)).unwrap_or(1);
+        let mut ords = Vec::with_capacity(every);
+        for (batch, chunk) in per_ord.chunks(every).enumerate() {
+            if chunk.len() == every {
+                deadline.check()?;
             }
-            let n = counts.next().unwrap_or(0);
-            // Keyword values are UTF-8 (they come from `str` values); anything else is skipped, never reinterpreted.
-            let Ok(v) = std::str::from_utf8(bytes) else {
-                return Ok(());
-            };
-            if let Some(slot) = by_value.get_mut(v) {
-                *slot = slot.saturating_add(n);
-            } else if by_value.len() < cap {
-                by_value.insert(v.to_owned(), n);
-            } else {
-                *capped = true;
-            }
-            Ok(())
-        });
-        self.per_ord.clear();
-        if expired {
-            return Err(SearchError::Deadline);
+            ords.clear();
+            ords.extend(chunk.iter().enumerate().filter_map(|(i, n)| {
+                (*n > 0)
+                    .then(|| u64::try_from(batch * every + i).ok())
+                    .flatten()
+            }));
+            let mut counts = chunk.iter().copied().filter(|n| *n > 0);
+            col.dictionary().sorted_ords_to_term_cb(&ords, |bytes| {
+                let n = counts.next().unwrap_or(0);
+                // Keyword values are UTF-8; invalid values are skipped, never reinterpreted.
+                let Ok(v) = std::str::from_utf8(bytes) else {
+                    return;
+                };
+                if let Some(slot) = by_value.get_mut(v) {
+                    *slot = slot.saturating_add(n);
+                } else if by_value.len() < cap {
+                    by_value.insert(v.to_owned(), n);
+                } else {
+                    *capped = true;
+                }
+            })?;
         }
-        streamed?;
+        self.per_ord.clear();
         Ok(())
     }
 }

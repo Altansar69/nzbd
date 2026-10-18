@@ -18,8 +18,8 @@ use zeroize::Zeroize;
 use crate::account::{
     AccountActor, AccountError, AccountPolicy, AuditActor, AuditEntry, ChosenProfile, Role,
     ThrottleKey, check_login_name, confusable_display_name_in_use, count_live, display_name_in_use,
-    insert_account_with, load_live, login_name_in_use, open_invite_for_name, require_actor,
-    require_session_actor, write_audit, write_audit_throttled,
+    insert_account_with, load_live, login_name_in_use, open_invite_for_name, require_session_actor,
+    write_audit, write_audit_throttled,
 };
 use crate::auth::insert_in_tx;
 use crate::profile::{RegistrationProfile, normalize_email, self_display_name_is_valid};
@@ -244,6 +244,9 @@ pub struct Redemption<'a> {
     pub password_hash: &'a str,
     /// The pending session to create; its `user_id` is ignored (the store sets the account).
     pub session: &'a NewSession,
+    /// Hash of the presented session to revoke on success, in the same transaction.
+    /// Invalid codes and refused profiles leave it untouched.
+    pub replacing: Option<&'a [u8; 32]>,
 }
 
 impl std::fmt::Debug for Redemption<'_> {
@@ -439,7 +442,7 @@ impl SqliteDb {
         now: i64,
     ) -> Result<i64, StoreError> {
         let mut tx = self.begin_immediate().await?;
-        let a = require_session_actor(&mut tx, actor, Role::Admin).await?;
+        let a = require_session_actor(&mut tx, actor, Role::Admin, now).await?;
         let id = create_invite_in(
             &mut tx,
             Some(a.id),
@@ -494,7 +497,7 @@ impl SqliteDb {
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.begin_immediate().await?;
-        let a = require_actor(&mut tx, actor.user_id, Role::Admin).await?;
+        let a = require_session_actor(&mut tx, actor, Role::Admin, now).await?;
         revoke_invite_in(
             &mut tx,
             &AuditActor::account(a.id, a.role, &a.username),
@@ -581,7 +584,7 @@ impl SqliteDb {
         now: i64,
     ) -> Result<i64, StoreError> {
         let mut tx = self.begin_immediate().await?;
-        let a = require_session_actor(&mut tx, actor, Role::Admin).await?;
+        let a = require_session_actor(&mut tx, actor, Role::Admin, now).await?;
         if a.id == new.target_id {
             return Err(AccountError::SelfTarget.into());
         }
@@ -641,6 +644,9 @@ impl SqliteDb {
     ///   `credential_staging` bound to the new pending session and changes nothing about the account; audit
     ///   `recover_redeem` naming the issuer in the detail (`issued_by=<id>`).
     ///
+    /// On either success, the presented session (`Redemption::replacing`) is revoked before
+    /// committing. A revoke failure rolls back the redemption; refusals never revoke it.
+    ///
     /// # Errors
     /// [`AccountError::InvalidCode`], [`AccountError::InvalidDisplayName`], [`AccountError::InvalidEmail`],
     /// [`AccountError::DisplayNameUnavailable`]; database failure.
@@ -667,6 +673,12 @@ impl SqliteDb {
         // An `Err` here drops `tx` uncommitted: a shape refusal of the profile changes nothing.
         match redeem_in(&mut tx, r, profile, policy, ip, now).await? {
             Outcome::Done(done) => {
+                if let Some(old) = r.replacing {
+                    sqlx::query("DELETE FROM session WHERE id_hash = ?1")
+                        .bind(old.as_slice())
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 tx.commit().await?;
                 return Ok(done);
             }
@@ -897,7 +909,7 @@ impl SqliteDb {
         now: i64,
     ) -> Result<(), StoreError> {
         let mut tx = self.begin_immediate().await?;
-        let a = require_actor(&mut tx, actor.user_id, Role::Admin).await?;
+        let a = require_session_actor(&mut tx, actor, Role::Admin, now).await?;
         let target = load_live(&mut tx, target_id)
             .await?
             .ok_or(AccountError::TargetNotFound)?;

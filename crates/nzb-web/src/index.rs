@@ -1602,7 +1602,12 @@ async fn index<S: SearchIndexV3>(
         size: human_bytes(s.bytes),
         incomplete: s.incomplete.to_string(),
     });
-    let ticks = st.ticks(&hidden).await;
+    // Filtered listings do not show the timeline, so do not query the ingest log for them.
+    let ticks = if p.is_filtered() {
+        Vec::new()
+    } else {
+        st.ticks(&hidden).await
+    };
     // Sidebar counts (T124 U14): one O(categories) read; a failure only drops the numbers, never the page.
     let counts = st
         .db

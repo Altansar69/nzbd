@@ -1,0 +1,20 @@
+# Keep query expansion inside nzb-search's bounded builders. Crates without Tantivy
+# share this workspace configuration; ban_probe.rs checks the paths in nzb-search.
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+disallowed-types = [
+  { path = "tantivy::query::QueryParser", reason = "Use the bounded query builder", allow-invalid = true },
+  { path = "tantivy::query::RegexQuery", reason = "Unbounded term expansion", allow-invalid = true },
+  { path = "tantivy::query::RegexPhraseQuery", reason = "Unbounded term expansion", allow-invalid = true },
+  { path = "tantivy::query::FuzzyTermQuery", reason = "Use bounded fuzzy expansion", allow-invalid = true },
+  { path = "tantivy::query::PhrasePrefixQuery", reason = "Use bounded prefix expansion", allow-invalid = true },
+]
+disallowed-methods = [
+  { path = "tantivy::query::QueryParser::parse_query", reason = "Use the bounded query builder", allow-invalid = true },
+  { path = "tantivy::query::QueryParser::for_index", reason = "Use the bounded query builder", allow-invalid = true },
+  { path = "tantivy::query::RegexQuery::from_pattern", reason = "Unbounded term expansion", allow-invalid = true },
+  { path = "tantivy::query::RegexQuery::from_regex", reason = "Unbounded term expansion", allow-invalid = true },
+  { path = "tantivy::query::wildcard_query_to_regex_str", reason = "Unbounded term expansion", allow-invalid = true },
+]

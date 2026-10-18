@@ -283,6 +283,37 @@ async fn sec_092_scanner_pauses_at_lag_limit() {
     stop(handle, workers).await;
 }
 
+#[tokio::test]
+async fn sec_092_lag_gate_resumes_at_small_odd_and_extreme_thresholds() {
+    for limit in [1_u64, 2, 3, 5, 100, u64::MAX - 1] {
+        let depth = Arc::new(AtomicU64::new(limit + 1));
+        let probe = Arc::clone(&depth);
+        let gate = LagGate::new(
+            limit,
+            Arc::new(move || {
+                let current = probe.load(Ordering::SeqCst);
+                Box::pin(async move { Some(current) })
+            }),
+        );
+        assert!(!gate.admit().await, "pause above {limit}");
+        depth.store(limit.div_ceil(2), Ordering::SeqCst);
+        assert!(
+            !gate.admit().await,
+            "stay paused at or above half of {limit}"
+        );
+        depth.store(limit.div_ceil(2) - 1, Ordering::SeqCst);
+        assert!(gate.admit().await, "resume below half of {limit}");
+        assert!(!gate.is_paused());
+        depth.store(limit, Ordering::SeqCst);
+        assert!(
+            gate.admit().await,
+            "do not flap at the pause boundary {limit}"
+        );
+        depth.store(limit + 1, Ordering::SeqCst);
+        assert!(!gate.admit().await, "pause again above {limit}");
+    }
+}
+
 /// Review 38 L5: a group that fails as a whole (not one job: a deadlock, a lost connection, a CHECK) is committed job
 /// by job; every job ends inserted, every source goes, and each job has exactly one `ok` log row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -34,8 +34,10 @@ What protects your instance and what you must keep safe.
 - **What is logged.** One JSON line per event on stdout (`docker compose logs nzbd`), no cookies, API keys, passwords,
   TOTP codes or CSRF tokens, no query strings on auth routes. The audit log (login, MFA, key and category changes,
   downloads, uploads, failures) is in the database and visible on `/admin`. The proxy log filter also redacts
-  `X-Api-Key`, `X-Csrf-Token`, `Cookie`, `Authorization` and the `api_key`/`key` query parameters, so error lines
-  (for example the 502 of a cut-off oversize upload) carry `REDACTED` instead.
+  `X-Api-Key`, `X-Csrf-Token`, `Cookie`, `Authorization`, `Referer` and the whole request URI, including its path
+  and query string, so error lines (for example the 502 of a cut-off oversize upload) carry `REDACTED` instead.
+  With an existing reverse proxy, configure its access and error logs to redact these fields too: the app cannot
+  remove a secret from a request that the proxy has already logged.
 - **Backups contain** the password hash, the sealed TOTP secret and key hashes: set a backup encryption key
   (RUNBOOK section 2), or encrypt them before copying off-host. Both backends strip sessions, staged credentials, open
   invitations, recovery codes and throttle rows from every backup, and mark it restore-pending.

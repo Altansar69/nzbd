@@ -157,6 +157,112 @@ async fn stale_tmp_of_crashed_run_is_cleaned() {
 }
 
 #[tokio::test]
+async fn overlapping_backups_refuse_before_removing_an_in_flight_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir).await;
+    let b = dir.path().join("backups");
+    fs::create_dir(&b).unwrap();
+    let active = b.join(format!(".{}.tmp", backup_name(100)));
+    let lock = fs::File::open(&b).unwrap();
+    lock.try_lock().unwrap();
+    fs::write(&active, b"snapshot in progress").unwrap();
+    // Independent opens are the same locking contract as maintenance and a separate CLI process.
+    let live = db.backup(&b, 101, 14).await.unwrap_err();
+    assert!(matches!(live, crate::StoreError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    let offline = backup_file(&dir.path().join("nzbd.sqlite"), &b, 102, 14)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(offline, crate::StoreError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert_eq!(fs::read(&active).unwrap(), b"snapshot in progress");
+    assert_eq!(fs::read_dir(&b).unwrap().count(), 1);
+    drop(lock);
+    // A crashed process releases the OS lock, so the next run can clean its partial snapshot.
+    let rep = db.backup(&b, 103, 14).await.unwrap();
+    assert!(!active.exists());
+    assert!(rep.path.is_file());
+}
+
+#[tokio::test]
+async fn cancelling_a_backup_caller_keeps_the_snapshot_locked_until_the_worker_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir).await;
+    let b = dir.path().join("backups");
+    fs::create_dir(&b).unwrap();
+    // All reader connections are held so the backup really waits at VACUUM INTO.await,
+    // after its temporary snapshot and directory lock exist, without timing a large database.
+    let mut held = Vec::new();
+    for _ in 0..crate::db::READER_CONNECTIONS {
+        held.push(db.readers().acquire().await.unwrap());
+    }
+    let running_db = db.clone();
+    let running_dir = b.clone();
+    let caller = tokio::spawn(async move { running_db.backup(&running_dir, 200, 14).await });
+    let active = b.join(format!(".{}.tmp", backup_name(200)));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !active.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let contender = tokio::time::timeout(std::time::Duration::from_secs(2), db.backup(&b, 201, 14))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(contender, crate::StoreError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    let offline = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        backup_file(&dir.path().join("nzbd.sqlite"), &b, 202, 14),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(offline, crate::StoreError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(
+        active.exists(),
+        "neither contender removed the active snapshot"
+    );
+    drop(held);
+    let published = b.join(backup_name(200));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let probe = fs::File::open(&b).unwrap();
+            if published.exists() && probe.try_lock().is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!active.exists());
+    let restored = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&published)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    let check: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&restored)
+        .await
+        .unwrap();
+    assert_eq!(check, "ok");
+    restored.close().await;
+    assert!(db.backup(&b, 203, 14).await.unwrap().path.is_file());
+}
+
+#[tokio::test]
 async fn failed_backup_leaves_no_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir).await;

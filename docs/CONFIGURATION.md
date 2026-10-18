@@ -56,7 +56,7 @@ Validate any change with `docker compose exec nzbd /nzbd config check` (after re
 | `[[ingest.rules]]` | none | Watch-folder rules, see below. At most 64, evaluated in file order, first match wins. Not settable through `NZBD__` env overrides (arrays of tables). |
 | `ingest.failed_uploads_max_files` | `1000` | Rotation bound for rejected *uploads* in `failed/` (oldest first, 0 = unlimited). Watch files are never rotated. |
 | `ingest.failed_uploads_max_bytes` | `1073741824` | Same, in bytes. |
-| `limits.max_file_bytes` | `67108864` (64 MiB, ceiling) | Maximum NZB size. May only be lowered. Keep the proxy `request_body` limit (65 MiB) above it. |
+| `limits.max_file_bytes` | `67108864` (64 MiB, ceiling) | Maximum NZB size. May only be lowered. Keep the proxy body limits above the app ceilings: 65 MiB on `/api/v1/nzb` (one file) and 321 MiB on `/upload` (a batch of up to five maximum-size files plus multipart overhead). |
 | `limits.parse_deadline_secs` | `20` (ceiling) | Parse wall-clock budget per file. May only be lowered. |
 | `limits.upload_per_key_per_min` | `30` (ceiling) | Uploads per minute per API key (1-30). A key can carry its own lower budget (Account page field or `nzbd apikey create --rate N`); the lower of the two applies. Every upload through a key also spends the owner's API budget, which takes its size from `limits.upload_per_session_per_min` (shared by all of that account's keys, separate from its UI form budget; the table is bounded and fails closed like the others). |
 | `limits.upload_per_session_per_min` | `30` (ceiling) | Uploaded files per minute per UI **account** (1-30; several sessions of one account share it). |

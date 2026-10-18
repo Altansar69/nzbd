@@ -15,7 +15,7 @@ workspace = true
 # exactly: every 0.x release changes the index format (= a rebuild, handled by the `schema` payload check).
 # `mmap` only: no stemmer/stopwords (scene names are not prose), no doc-store compression at all (there are
 # no stored fields; review I4 drops `lz4-compression`), no zstd columnar compression.
-tantivy = { version = "=0.26.2", default-features = false, features = ["mmap"] }
+tantivy = { version = "=0.27.0", default-features = false, features = ["mmap"] }
 # Already in the tree through tantivy (same versions, no new package): the term-dictionary `Automaton`
 # trait and the Levenshtein DFA, so fuzzy candidates are enumerated by OUR code under the M6 budgets
 # (tantivy keeps its own DFA wrapper crate-private, and `FuzzyTermQuery` would expand without a bound).

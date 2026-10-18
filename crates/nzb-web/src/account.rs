@@ -514,13 +514,20 @@ async fn post_revoke(
     }
     match auth
         .db()
-        .revoke_user_session(sess.user_id, &target, Some(&ip.to_string()), auth.now())
+        .revoke_user_session(
+            sess.user_id,
+            &sess.id_hash,
+            &target,
+            Some(&ip.to_string()),
+            auth.now(),
+        )
         .await
     {
         Ok(true) => render_account(&auth, &sess, Some("Session revoked."), None).await,
         Ok(false) => {
             render_account(&auth, &sess, None, Some("That session could not be found.")).await
         }
+        Err(StoreError::NotFound) => see_other("/login", Some(auth.clear_cookie())),
         Err(e) => {
             tracing::error!(error = %e, "session revoke failed");
             internal()
@@ -544,6 +551,7 @@ async fn post_revoke_others(
         .await
     {
         Ok(_) => render_account(&auth, &sess, Some("All other sessions were revoked."), None).await,
+        Err(StoreError::NotFound) => see_other("/login", Some(auth.clear_cookie())),
         Err(e) => {
             tracing::error!(error = %e, "session revoke failed");
             internal()

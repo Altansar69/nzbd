@@ -1,5 +1,84 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Password hashing and verification keep their concurrency slots until the blocking work actually finishes, even
+  when a login or invitation request is cancelled. Cancelled waiters also leave the queue correctly.
+- Downloads release their buffers and concurrency slots at the deadline even when a stalled client stops reading.
+  Frames already handed to the HTTP connection retain only their chunk, not the entire NZB allocation.
+- Upgrade Tantivy to 0.27.0 and its `lru` dependency to 0.18.5, fixing **RUSTSEC-2026-0253**.
+- Reject non-whitespace text, CDATA and entity references outside the NZB document root, including after its closing
+  tag. Opening stored blobs uses non-blocking, no-follow file access so a substituted FIFO cannot hang a reader.
+- Cap the configured search offset window at its supported maximum, preventing oversized result allocations.
+  Clippy now rejects Tantivy query APIs that bypass the bounded query builders.
+- Invitation and recovery redemption revoke a presented old session in the same transaction as the new session.
+  A revocation failure rolls everything back, preserving the code for a retry.
+- Revoking sessions, API keys, invitations or recovery codes revalidates the calling session inside the mutation
+  transaction, so a delayed request cannot use a revoked cookie to undo a later recovery.
+- Sensitive account writes also refuse expired sessions that have not yet been purged, and a delayed session
+  refresh cannot revive an expired cookie.
+- Proxy error logs redact the complete request URI and Referer, covering tokens in arbitrary query parameters
+  or path segments as well as the already protected authentication headers.
+- Stored blobs refuse pre-existing symbolic links in either shard directory before reading, refreshing or deleting.
+  Operator-configured links at the store root remain supported.
+- Bulk archive timeouts retain concurrency slots until an in-flight storage read actually finishes.
+- Quarantine purges respect the cleanup deadline and recheck the administrator's authority between batches.
+
+### Fixed
+
+- SQLite backups lock their destination directory through cleanup, publication and rotation. Concurrent backups
+  cannot remove each other's temporary snapshot, and cancelling the caller does not release the lock early.
+  Filesystem and encryption work runs off the async runtime threads.
+- Importing a duplicate repairs an existing corrupt blob even when its size matches the incoming file.
+- A cancelled garbage-collection removal preserves a healthy blob published by a concurrent repair; the old copy
+  remains in quarantine instead of overwriting the repair.
+- PostgreSQL encrypted restore clears the actual temporary decryption file left by an interrupted restore.
+- PostgreSQL backups also lock the destination directory through cleanup and publication. Cancelled exports
+  release the lock without publishing a partial backup.
+- Database errors during indexing preserve the outbox and discard uncommitted index changes for a clean retry.
+- Upload category hints respect the current user's UI visibility; the upload API retains its documented ability
+  to ingest categories hidden from the UI, for both header and multipart hints.
+- Bound panic tracking when ingestion repeatedly encounters new failing paths. SQLite credential writers acquire
+  their write transaction before reading, and failed-ingest lookups use a partial SHA index.
+- Ingestion resumes correctly after index lag falls below half the configured threshold, including thresholds of
+  one or an odd number.
+- Expired sessions and pending MFA redirect the whole page during HTMX navigation. Empty search results keep a
+  valid swap target, and filters stay synchronized after sorting or navigating back.
+- Network errors, timeouts and failed HTMX requests display an accessible message. The select-all checkbox reflects
+  partial selection and restored pages; sorting and select-all remain usable on mobile. Email fields use the same
+  styling as other inputs, and viewer empty states no longer suggest an upload they cannot perform.
+- Selection actions stay disabled until a release or file is checked. Without JavaScript, empty submissions show a
+  readable HTML error page with navigation; API requests continue to receive JSON errors.
+- Enter in the bulk source field submits the source action when JavaScript is available. Ambiguous implicit bulk
+  submissions are blocked; without JavaScript, the explicit action buttons remain usable.
+- Proxy examples allow a complete web upload batch (321 MiB) while keeping the API request limit at 65 MiB.
+  The nginx example preserves the port in the `Host` header so origin validation works on non-default ports.
+- Refresh the CSS and JavaScript asset hashes, and make the installer and PostgreSQL bootstrap assignments explicit
+  for shell linting.
+
+### Changed
+
+- Filtered release lists skip the unused ingest-timeline database query. Statistics dictionary decoding uses bounded
+  batches to preserve query deadlines with Tantivy 0.27.
+- Expand regression coverage for cancellation, stalled downloads, backup concurrency, blob repair, malformed NZBs,
+  index upgrades, SQLite outbox transactions and restore credential revocation. The legacy SQLite check fixture is
+  generated from migrations, and source-bundle tests work when the separate fuzz project is absent.
+- Refresh the Rust licence inventory from the Linux production dependency tree and Cargo metadata.
+
+### Upgrading
+
+The search index schema is now **3**. On the first opening after this upgrade, nzbd automatically rebuilds an older
+index from the database. Search stays in degraded mode until the rebuild finishes; allow time for large libraries.
+The database and stored NZB files are retained, and no manual index deletion is required.
+
+### Dependency audit status
+
+`Cargo.lock` still contains `rsa` 0.9.10 through SQLx's optional MySQL dependency, so a raw `cargo audit` still reports
+**RUSTSEC-2023-0071**. Neither `rsa` nor `sqlx-mysql` is present in the application's enabled dependency tree, including
+`cargo tree --target all`. The advisory has not been suppressed or removed from the audit results.
+
 ## 0.5.1 (2026-10-18)
 
 ### Changed

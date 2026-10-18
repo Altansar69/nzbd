@@ -423,7 +423,6 @@ impl<S: IndexSource> Indexer<S> {
     }
 
     /// Reads, loads, applies and commits one batch of outbox rows into `engine`; consumes them when
-    /// Reads, loads, applies and commits one batch of outbox rows into `engine`; consumes them when
     /// `consume`.
     ///
     /// Memory (review 32 M2): ids are loaded [`LOAD_CHUNK`] at a time and each chunk is handed to the
@@ -475,9 +474,14 @@ impl<S: IndexSource> Indexer<S> {
             Err(err) => {
                 // The writer lost the round's uncommitted work. Before blaming the writer, look for a
                 // document that breaks it (review 32 L4).
-                let Ok((bad, failed)) = self.isolate(engine, &ids).await else {
-                    self.writer_failed(engine).await;
-                    return Err(err);
+                let (bad, failed) = match self.isolate(engine, &ids).await {
+                    Ok(v) => v,
+                    // Isolation already discarded the interrupted group's pending changes.
+                    Err(source @ SearchError::Store(_)) => return Err(source),
+                    Err(_) => {
+                        self.writer_failed(engine).await;
+                        return Err(err);
+                    }
                 };
                 // A quarantined release leaves the listings (its older copy too).
                 self.apply(engine, Vec::new(), bad.clone()).await?;
@@ -597,6 +601,7 @@ impl<S: IndexSource> Indexer<S> {
     /// quarantined as [`QUARANTINE_DOC_INDEX`]) and the documents that could not be built.
     ///
     /// # Errors
+    /// Source errors stop isolation and discard the interrupted group's uncommitted work.
     /// The writer itself is broken: it cannot commit an empty change, or no group succeeds at all
     /// (every document failing means the writer, not the documents).
     async fn isolate(
@@ -635,10 +640,20 @@ impl<S: IndexSource> Indexer<S> {
                 blocking(move || e.commit(&e.payload())).await
             }
             .await;
-            if r.is_ok() {
-                any_ok = true;
-                build_failed.extend(failed);
-                continue;
+            match r {
+                Ok(()) => {
+                    any_ok = true;
+                    build_failed.extend(failed);
+                    continue;
+                }
+                Err(err @ SearchError::Store(_)) => {
+                    // A failed load says nothing about the documents or the writer. Drop this
+                    // group's queued work and leave every outbox event available for a retry.
+                    let e = Arc::clone(engine);
+                    blocking(move || e.reopen_writer()).await?;
+                    return Err(err);
+                }
+                Err(_) => {}
             }
             healthy(Arc::clone(engine)).await?;
             if let [one] = group.as_slice() {
@@ -775,7 +790,13 @@ impl<S: IndexSource> Indexer<S> {
                 Err(e) => {
                     // The writer dropped everything since the last scan commit: quarantine the
                     // document that broke it (review 32 L4), then go back to that commit.
-                    let (bad, failed) = self.isolate(new, &ids).await.map_err(|_| e)?;
+                    let (bad, failed) = self.isolate(new, &ids).await.map_err(|isolation| {
+                        if matches!(isolation, SearchError::Store(_)) {
+                            isolation
+                        } else {
+                            e
+                        }
+                    })?;
                     for id in &bad {
                         self.source.quarantine(*id, QUARANTINE_DOC_INDEX).await?;
                     }
@@ -827,7 +848,13 @@ impl<S: IndexSource> Indexer<S> {
                 #[cfg(test)]
                 Err(SearchError::Injected) => return Err(SearchError::Injected),
                 Err(e) => {
-                    let (bad, failed) = self.isolate(new, &ids).await.map_err(|_| e)?;
+                    let (bad, failed) = self.isolate(new, &ids).await.map_err(|isolation| {
+                        if matches!(isolation, SearchError::Store(_)) {
+                            isolation
+                        } else {
+                            e
+                        }
+                    })?;
                     for id in &bad {
                         self.source.quarantine(*id, QUARANTINE_DOC_INDEX).await?;
                     }

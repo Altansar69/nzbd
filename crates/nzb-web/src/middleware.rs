@@ -307,8 +307,9 @@ pub(crate) async fn context_layer(State(sh): St, mut req: Request, next: Next) -
         .map_or_else(|| req.uri().path(), axum::http::uri::PathAndQuery::as_str);
     // Query strings can carry tokens: never logged. Cap length against log flooding.
     let path_log: String = path_for_log(target).chars().take(200).collect();
-    let wants_html = (method == Method::GET || method == Method::HEAD)
-        && !req.uri().path().starts_with("/api/")
+    // Native form POSTs request HTML too. Their validation errors must remain navigable pages;
+    // API routes always retain JSON, and non-browser callers keep JSON unless they ask for HTML.
+    let wants_html = !req.uri().path().starts_with("/api/")
         && req
             .headers()
             .get(header::ACCEPT)
@@ -498,3 +499,130 @@ pub(crate) async fn limits_layer(State(sh): St, mut req: Request, next: Next) ->
 
 /// Convenience for configs: default request timeout.
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use axum::{Router, routing::post};
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one response matrix verifies negotiation and the shared security headers
+    async fn form_post_errors_are_html_but_api_and_json_clients_keep_json() {
+        let app = crate::harden(
+            Router::new()
+                .route(
+                    "/release/7/download/selected",
+                    post(|| async { ApiError::new(StatusCode::BAD_REQUEST, "NO_FILES_SELECTED") }),
+                )
+                .route(
+                    "/releases/bulk/download",
+                    post(|| async { ApiError::new(StatusCode::BAD_REQUEST, "NO_SELECTION") }),
+                )
+                .route(
+                    "/api/v1/nzb",
+                    post(|| async { ApiError::new(StatusCode::BAD_REQUEST, "BAD_REQUEST") }),
+                ),
+            &WebConfig::default(),
+        );
+        for (path, accept, htmx, html, code) in [
+            (
+                "/release/7/download/selected",
+                "text/html,application/xhtml+xml",
+                false,
+                true,
+                "NO_FILES_SELECTED",
+            ),
+            (
+                "/releases/bulk/download",
+                "text/html",
+                false,
+                true,
+                "NO_SELECTION",
+            ),
+            (
+                "/release/7/download/selected",
+                "text/html",
+                true,
+                true,
+                "NO_FILES_SELECTED",
+            ),
+            (
+                "/release/7/download/selected",
+                "application/json",
+                false,
+                false,
+                "NO_FILES_SELECTED",
+            ),
+            (
+                "/releases/bulk/download",
+                "*/*",
+                false,
+                false,
+                "NO_SELECTION",
+            ),
+            ("/api/v1/nzb", "text/html", false, false, "BAD_REQUEST"),
+        ] {
+            let mut req = Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(header::ACCEPT, accept)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if htmx {
+                req = req.header("hx-request", "true");
+            }
+            let resp = app
+                .clone()
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            // HTMX must retain the error status so its normal responseError handler announces it.
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path} {accept}");
+            assert_eq!(
+                resp.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store"
+            );
+            assert_eq!(
+                resp.headers().get("x-content-type-options").unwrap(),
+                "nosniff"
+            );
+            let request_id = resp
+                .headers()
+                .get("x-request-id")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let content_type = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let text = std::str::from_utf8(&body).unwrap();
+            if html {
+                assert!(content_type.starts_with("text/html"));
+                assert!(text.contains("Nothing selected"));
+                assert!(text.contains("Back to the index"));
+                assert!(text.contains(code) && text.contains(&request_id));
+            } else {
+                assert_eq!(content_type, "application/json");
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    json.pointer("/error/code")
+                        .and_then(serde_json::Value::as_str),
+                    Some(code)
+                );
+                assert_eq!(
+                    json.pointer("/error/request_id")
+                        .and_then(serde_json::Value::as_str),
+                    Some(request_id.as_str())
+                );
+            }
+        }
+    }
+}

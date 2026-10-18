@@ -364,7 +364,7 @@ pub(crate) struct Inner {
     pub(crate) token_key: [u8; 32],
     /// Consumed login-form token ids (single use, bounded, fail closed; in memory only).
     pub(crate) login_tokens: crate::csrf::SingleUseSet,
-    pub(crate) verify_slots: Semaphore,
+    pub(crate) verify_slots: Arc<Semaphore>,
     /// Requests currently waiting for a verify slot; bounded by `MAX_VERIFY_WAITERS`.
     pub(crate) verify_waiting: AtomicUsize,
     /// Completed Argon2 verifications (any branch); lets tests prove every failure path pays
@@ -376,7 +376,7 @@ pub(crate) struct Inner {
     /// Per-account budget of `POST /account/preferences` ([`PREF_SAVES_PER_MIN`], review 37 L3).
     pub(crate) pref_saves: KeyedLimiter<i64>,
     /// Argon2 queue of `/invite` (1 permit, [`MAX_INVITE_WAITERS`] waiters).
-    pub(crate) invite_slots: Semaphore,
+    pub(crate) invite_slots: Arc<Semaphore>,
     pub(crate) invite_waiting: AtomicUsize,
     /// Bounded channel to the writer task of the throttled `authz_denied` audit rows (I-1): a
     /// refused request itself stays read-only.
@@ -485,12 +485,12 @@ impl AuthState {
             dummy_hash,
             token_key,
             login_tokens: crate::csrf::SingleUseSet::new(crate::csrf::LOGIN_TOKEN_SET_CAP),
-            verify_slots: Semaphore::new(slots),
+            verify_slots: Arc::new(Semaphore::new(slots)),
             verify_waiting: AtomicUsize::new(0),
             verify_runs: AtomicU64::new(0),
             pref_saves: KeyedLimiter::new(PREF_SAVES_PER_MIN, 4096, Arc::clone(&wall_ms)),
             unknown_ip: KeyedLimiter::new(1, 4096, wall_ms),
-            invite_slots: Semaphore::new(1),
+            invite_slots: Arc::new(Semaphore::new(1)),
             invite_waiting: AtomicUsize::new(0),
             denied_tx,
             library_gen: Arc::default(),

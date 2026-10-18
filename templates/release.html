@@ -55,7 +55,7 @@
 {% if files.is_empty() %}<p class="muted" role="status">No files.</p>{% else %}
 <div id="files" hx-target="#files" hx-select="#files" hx-swap="outerHTML">
 <p class="muted" role="status">Showing {{ first }}-{{ last }} of {{ total_files }} files (page {{ page }} of {{ pages }}).</p>
-<form method="post" action="/release/{{ id }}/download/selected" id="selfiles" aria-label="Download selected files">
+<form method="post" action="/release/{{ id }}/download/selected" id="selfiles" class="selection-form" aria-label="Download selected files" aria-describedby="files-selection-help">
 {% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
 {% endif %}<div tabindex="0" class="tablewrap">
 <table>
@@ -75,7 +75,7 @@
 {% endfor %}</tbody>
 </table>
 </div>
-<p class="actions selbar"><button type="submit">Download selected</button> <span class="muted">An NZB with only the files ticked on this page.</span></p>
+<p class="actions selbar"><button type="submit">Download selected</button> <span id="files-selection-help" class="muted">Select at least one file above. Downloads an NZB with only the files ticked on this page.</span></p>
 </form>
 <div class="pagerbar">
 <nav class="pager" aria-label="Files pagination" hx-boost="true">
