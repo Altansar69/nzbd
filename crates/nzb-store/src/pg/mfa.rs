@@ -20,7 +20,8 @@ async fn audit_tx(
     crate::pg::account::write_audit_legacy(tx, now, actor, event, detail, ip).await
 }
 
-/// Arms the enrollment token of one account (only while MFA is not enabled).
+/// Arms the enrollment token of one account (only while MFA is not enabled). The pending secret
+/// is dropped, so a new token always starts with a new secret.
 async fn arm_enrollment_token(
     conn: &mut sqlx::PgConnection,
     id: i64,
@@ -29,8 +30,8 @@ async fn arm_enrollment_token(
     now: i64,
 ) -> Result<bool, StoreError> {
     let res = sqlx::query(
-        "UPDATE account SET enroll_token_hash = $2, enroll_token_expires = $3 \
-         WHERE id = $1 AND totp_enabled = false",
+        "UPDATE account SET enroll_token_hash = $2, enroll_token_expires = $3, \
+         totp_secret_enc = NULL WHERE id = $1 AND totp_enabled = false",
     )
     .bind(id)
     .bind(token_hash.as_slice())

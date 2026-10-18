@@ -10,6 +10,8 @@ deploy/.env
 deploy/.env.bak.*
 deploy/compose.yaml
 deploy/compose.yaml.bak.*
+deploy/storage/
+deploy/storage-new/
 deploy/config/nzbd.toml
 deploy/compose.proxy-net.yaml
 deploy/.install-overlay.*

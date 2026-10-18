@@ -51,6 +51,8 @@ mod analyzer_tests;
 #[cfg(test)]
 mod ban_probe;
 #[cfg(test)]
+mod collect_tests;
+#[cfg(test)]
 mod conformance_tests;
 #[cfg(test)]
 mod degraded_tests;

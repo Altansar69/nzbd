@@ -556,15 +556,30 @@ pub(crate) async fn post_enroll(
         }
         return show_secret(&auth, &sess, &mode, "").await;
     }
-    // Step 2: confirm with a code. In token mode the token is re-verified inside the confirming
-    // transaction.
-    if token_mode && canon.is_none() {
-        // No usable token: count it like any wrong attempt and ask again.
-        let _ = auth
+    // Step 2: confirm with a code. In token mode the token is proven before the secret is created
+    // or shown (a wrong token must never reach the secret page), then re-verified inside the
+    // confirming transaction.
+    if token_mode {
+        let ok = match auth
             .db()
-            .check_enrollment_token_v2(sess.user_id, None, &attempt.ctx(), Some(&ip_text), now)
-            .await;
-        return render_token_prompt(&sess, Some(INVALID_TOKEN));
+            .check_enrollment_token_v2(
+                sess.user_id,
+                token_hash,
+                &attempt.ctx(),
+                Some(&ip_text),
+                now,
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "enrollment token check failed");
+                return internal();
+            }
+        };
+        if !ok || canon.is_none() {
+            return render_token_prompt(&sess, Some(INVALID_TOKEN));
+        }
     }
     let (secret, blob) = match pending_for(&auth, key, &sess, &mode).await {
         Ok(v) => v,

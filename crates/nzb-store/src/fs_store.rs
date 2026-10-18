@@ -329,7 +329,8 @@ impl FsStore {
         let mut n = 0usize;
         for (sha, _, path) in self.gc_trash_entries()? {
             let dest = self.blob_path(&sha);
-            if is_regular(&dest) || hash_file(&path).is_ok_and(|h| h != sha) {
+            // A blob that cannot be hashed is not verified, so it stays in quarantine.
+            if is_regular(&dest) || !hash_file(&path).is_ok_and(|h| h == sha) {
                 continue;
             }
             if let Some(parent) = dest.parent() {

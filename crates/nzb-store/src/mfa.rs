@@ -96,7 +96,8 @@ pub(crate) fn ct_eq32(a: &[u8], b: &[u8; 32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0_u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Arms the enrollment token of one account (only while MFA is not enabled).
+/// Arms the enrollment token of one account (only while MFA is not enabled). The pending secret
+/// is dropped, so a new token always starts with a new secret.
 async fn arm_enrollment_token(
     conn: &mut sqlx::SqliteConnection,
     id: i64,
@@ -105,8 +106,8 @@ async fn arm_enrollment_token(
     now: i64,
 ) -> Result<bool, StoreError> {
     let res = sqlx::query(
-        "UPDATE account SET enroll_token_hash = ?2, enroll_token_expires = ?3 \
-         WHERE id = ?1 AND totp_enabled = 0",
+        "UPDATE account SET enroll_token_hash = ?2, enroll_token_expires = ?3, \
+         totp_secret_enc = NULL WHERE id = ?1 AND totp_enabled = 0",
     )
     .bind(id)
     .bind(token_hash.as_slice())

@@ -14,3 +14,16 @@ dist/
 .env
 *.key
 *.sqlite*
+# install.sh output: the storage folder (keys, CA, databases, NZBs) and host-specific
+# configuration must never enter the build context (`COPY . .` in deploy/Dockerfile).
+deploy/storage/
+deploy/storage-new/
+deploy/.env*
+deploy/compose.yaml*
+deploy/compose.proxy-net.yaml
+deploy/.install-overlay.*
+deploy/*.new
+deploy/config/nzbd.toml
+deploy/config/*.new
+**/*.key
+**/*.sqlite*
