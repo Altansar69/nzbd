@@ -86,7 +86,7 @@ through the app role, so after an incident review the accounts (`nzbd user list`
 `nzbd backup` prints and the server logs: copy it off-host with every backup and compare it after an incident or a
 restore (RUNBOOK section 9); only a copy the attacker cannot reach proves the history was not rewritten.
 
-**The choice is final** for a library in 3.0: the installer never switches it, and nzbd refuses a switched
+**The choice is final** for a library in 0.5: the installer never switches it, and nzbd refuses a switched
 configuration (`BACKEND_MISMATCH` / `LIBRARY_MISMATCH`). Moving a SQLite library to PostgreSQL is deferred (D37); if
 you ever move by hand, the old `nzbd.sqlite` still holds password hashes, sealed TOTP secrets and emails: nzbd never
 deletes it, so put it into an encrypted backup or delete it yourself.

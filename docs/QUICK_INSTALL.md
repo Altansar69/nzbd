@@ -89,7 +89,7 @@ tells you how to start fresh; it never re-owns or deletes them.
 | **2. PostgreSQL** | Adds a hardened PostgreSQL 18 container (no network at all, reached through a socket, non-root, read-only), generates its passwords (never shown), and applies the schema with a one-shot `setup` service that alone holds the database owner's password. The more secure choice for a **shared or internet-facing** install: the database itself then refuses what a compromised nzbd process might try (rewriting the audit history, deleting accounts), which SQLite cannot ([OPERATOR_SECURITY.md](OPERATOR_SECURITY.md), "Choosing a backend"). |
 
 The choice is final for that library: a re-run keeps it and refuses to switch (moving a SQLite library to PostgreSQL is
-not supported in 3.0).
+not supported in 0.5).
 
 With an existing proxy you are responsible for HTTPS (and an outer login if you want one) there; nzbd always
 requires its own password + TOTP. Details and the exact requirements are printed at the end of the install.

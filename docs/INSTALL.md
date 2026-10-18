@@ -7,7 +7,7 @@ From a bare Docker host to a running, secured instance. About 30 minutes. The gu
 the new watch folder or use `nzbd import <dir>` ([RUNBOOK.md](RUNBOOK.md) section 5, "Refill a new library"). The installer detects a
 2.x install next to it and never reuses its data directory.
 
-**Choose the database once** (it cannot be switched later in 3.0):
+**Choose the database once** (it cannot be switched later in 0.5):
 
 | | SQLite (default) | PostgreSQL |
 |---|---|---|

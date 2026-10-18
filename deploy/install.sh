@@ -734,13 +734,13 @@ if [ "$write_env" = 1 ]; then
   say "     'setup' service and generated database passwords. The more secure choice for a shared or internet-facing"
   say "     install: the database also binds a compromised nzbd (it cannot rewrite the audit history or delete"
   say "     accounts), which SQLite cannot do (docs/OPERATOR_SECURITY.md, 'Choosing a backend')."
-  say "  The choice is final for this library: switching later is not supported in 3.0."
+  say "  The choice is final for this library: switching later is not supported in 0.5."
   case "$PREV_BACKEND" in postgres) bdef=2 ;; *) bdef=1 ;; esac
   ask DBCHOICE "Choose" "$bdef"
   case "$DBCHOICE" in 1) DB_BACKEND=sqlite ;; 2) DB_BACKEND=postgres ;; *) die "answer 1 or 2." ;; esac
   # A re-run never switches an existing library (ARCHITECTURE v3 13.5): the SQLite -> PostgreSQL move is deferred (D37).
   if [ -n "$PREV_BACKEND" ] && [ "$PREV_BACKEND" != "$DB_BACKEND" ]; then
-    die "this install uses $PREV_BACKEND; switching the backend of an existing library is not supported in 3.0 (the move script is deferred). Answer $bdef, or deploy a new library from another directory."
+    die "this install uses $PREV_BACKEND; switching the backend of an existing library is not supported in 0.5 (the move script is deferred). Answer $bdef, or deploy a new library from another directory."
   fi
 
   if [ "$MODE" = bundled ]; then
