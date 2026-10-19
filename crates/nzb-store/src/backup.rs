@@ -172,6 +172,18 @@ async fn run_backup(
     .map_err(|_| StoreError::Io(std::io::Error::other("backup worker failed")))?
 }
 
+/// Exercise the real worker with a deliberately occupied private pool, independently of the
+/// request reader pool. This keeps cancellation/locking tests deterministic without a large file.
+#[cfg(test)]
+pub(crate) async fn backup_with_pool_for_test(
+    pool: SqlitePool,
+    dir: PathBuf,
+    now: i64,
+    keep: usize,
+) -> Result<BackupReport, StoreError> {
+    run_backup(pool, dir, now, keep, None, true).await
+}
+
 /// Snapshot `pool`'s database into `dir`, then rotate to `keep` files (min 1).
 async fn backup_pool(
     pool: &SqlitePool,
@@ -448,6 +460,9 @@ impl SqliteDb {
     }
 
     /// [`SqliteDb::backup`] with optional at-rest encryption (`Some(key)` writes `...sqlite.enc`).
+    /// Each admitted snapshot owns a separate connection until its worker finishes. Await this
+    /// operation when its completion is required: [`SqliteDb::close`] closes the ordinary pools,
+    /// but does not join a snapshot already in progress. An already-closed handle is refused.
     ///
     /// # Errors
     /// Database, filesystem or encryption errors.
@@ -458,15 +473,24 @@ impl SqliteDb {
         keep: usize,
         key: Option<&BackupKey>,
     ) -> Result<BackupReport, StoreError> {
-        run_backup(
-            self.readers().clone(),
-            dir.to_path_buf(),
-            now,
-            keep,
-            key.cloned(),
-            false,
-        )
-        .await
+        // Preserve the closed-handle contract instead of reopening a database after shutdown.
+        if self.readers().is_closed() {
+            return Err(sqlx::Error::PoolClosed.into());
+        }
+        // Keep the exact filename and connection pragmas, but not the request pool's progress
+        // handler: a maintenance snapshot must not inherit a request's statement deadline.
+        // Lazy opening transfers ownership to the worker before any connection attempt awaits.
+        let options = self
+            .readers()
+            .connect_options()
+            .as_ref()
+            .clone()
+            .read_only(true)
+            .create_if_missing(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options);
+        run_backup(pool, dir.to_path_buf(), now, keep, key.cloned(), true).await
     }
 
     /// Delete sessions whose `expires_at` is at or before `now`. Returns rows removed.

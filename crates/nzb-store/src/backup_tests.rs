@@ -190,15 +190,19 @@ async fn cancelling_a_backup_caller_keeps_the_snapshot_locked_until_the_worker_f
     let db = open(&dir).await;
     let b = dir.path().join("backups");
     fs::create_dir(&b).unwrap();
-    // All reader connections are held so the backup really waits at VACUUM INTO.await,
-    // after its temporary snapshot and directory lock exist, without timing a large database.
-    let mut held = Vec::new();
-    for _ in 0..crate::db::READER_CONNECTIONS {
-        held.push(db.readers().acquire().await.unwrap());
-    }
-    let running_db = db.clone();
+    // Hold the worker's private connection so it really waits at VACUUM INTO.await, after its
+    // temporary snapshot and directory lock exist. Backups no longer borrow request readers.
+    let worker_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(db.readers().connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let held = worker_pool.acquire().await.unwrap();
+    let running_pool = worker_pool.clone();
     let running_dir = b.clone();
-    let caller = tokio::spawn(async move { running_db.backup(&running_dir, 200, 14).await });
+    let caller = tokio::spawn(async move {
+        crate::backup::backup_with_pool_for_test(running_pool, running_dir, 200, 14).await
+    });
     let active = b.join(format!(".{}.tmp", backup_name(200)));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !active.exists() {
@@ -235,7 +239,11 @@ async fn cancelling_a_backup_caller_keeps_the_snapshot_locked_until_the_worker_f
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let probe = fs::File::open(&b).unwrap();
-            if published.exists() && probe.try_lock().is_ok() {
+            if published.exists()
+                && probe.try_lock().is_ok()
+                && worker_pool.is_closed()
+                && worker_pool.size() == 0
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -243,6 +251,11 @@ async fn cancelling_a_backup_caller_keeps_the_snapshot_locked_until_the_worker_f
     })
     .await
     .unwrap();
+    assert!(
+        worker_pool.is_closed(),
+        "the detached worker closes its pool"
+    );
+    assert_eq!(worker_pool.size(), 0, "the private connection is released");
     assert!(!active.exists());
     let restored = SqlitePoolOptions::new()
         .max_connections(1)
