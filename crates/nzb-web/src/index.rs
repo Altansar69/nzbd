@@ -12,8 +12,9 @@
 //! v3 search contract (T123, ARCHITECTURE 3.5): the listing goes through [`SearchIndexV3`] with prefix matching
 //! on the last word and the fuzzy fallback for a text query without an exact hit (D35 Q5), totals that may be a
 //! lower bound ("more than n", Q1), numbered (offset) pages capped by the engine at 100,000 rows (Q2: a page beyond
-//! the cap that is not near the end is the uniform `400 BAD_QUERY`; keyset Next/Previous and Last are unaffected),
-//! and, while no index generation is servable, the bounded degraded browse. Every condition is a fixed English
+//! the cap that is not near the end is the uniform `400 BAD_QUERY`; keyset neighbours avoid that offset cap).
+//! Page numbers remain bounded by [`MAX_PAGE`], so Last is unavailable when the real last page exceeds it.
+//! While no index generation is servable, the bounded degraded browse is used. Every condition is a fixed English
 //! notice; expanded or approximate terms are never shown (review 30 I2).
 //!
 //! Every query parameter is untrusted. [`parse_params`] turns the raw query into an
@@ -1119,7 +1120,7 @@ struct IndexPage {
     prev_href: Option<String>,
     next_href: Option<String>,
     first_href: String,
-    last_href: String,
+    last_href: Option<String>,
     clear_href: String,
     sort_value: &'static str,
     chips: Vec<Chip>,
@@ -1133,7 +1134,7 @@ struct IndexPage {
     /// The total is a lower bound (the count stopped at `search.count_budget_ms`): "more than n", no
     /// page count and no Last link (T123, D35 Q1).
     approx: bool,
-    /// The page count is known (exact total, not degraded): "page N of M" and the Last link.
+    /// The page count is known (exact total, not degraded): "page N of M". Last also needs a supported page number.
     pages_known: bool,
     /// The total with thousands separators (the status line).
     total_text: String,
@@ -1180,6 +1181,8 @@ pub const NOTICE_DEGRADED_FILTERS: &str =
 pub const NOTICE_DEGRADED_CATEGORY: &str = "This category is available after the rebuild.";
 /// Degraded browse that stopped at its row budget.
 pub const NOTICE_DEGRADED_MORE: &str = "More releases are listed after the rebuild.";
+/// An exact total can exceed the range of page numbers accepted by the UI.
+const NOTICE_PAGE_LIMIT: &str = "The last page is beyond the supported page range. Narrow your search or filters to reach the end of the results.";
 
 /// "More than n" notice (D35 Q1): `n` is the engine's lower bound, formatted with separators.
 fn notice_more_than(n: u64) -> String {
@@ -1542,7 +1545,7 @@ async fn index<S: SearchIndexV3>(
         Err(ListError::BadQuery) => return bad_query(),
         Err(ListError::Failed(e)) => Err(e),
     };
-    let listing = match listed {
+    let mut listing = match listed {
         Ok(l) => l,
         Err(e) => {
             tracing::error!(error = %e, "index search failed");
@@ -1560,6 +1563,12 @@ async fn index<S: SearchIndexV3>(
     if p.cursor.is_some() || listing.degraded {
         // A cursor page's number is advisory: after concurrent deletes it can exceed the page count.
         pages = pages.max(u64::from(p.page));
+    }
+    let last_page = u32::try_from(pages.max(1))
+        .ok()
+        .filter(|page| *page <= MAX_PAGE);
+    if pages_known && last_page.is_none() {
+        listing.notices.push(Notice::info(NOTICE_PAGE_LIMIT));
     }
     // A degraded page is numbered by the page parameter (advisory, like a cursor page).
     let start = if listing.degraded {
@@ -1656,12 +1665,7 @@ async fn index<S: SearchIndexV3>(
         prev_href,
         next_href,
         first_href: p.href(tax, p.sort, 1, true),
-        last_href: p.href(
-            tax,
-            p.sort,
-            u32::try_from(pages.max(1)).unwrap_or(MAX_PAGE),
-            true,
-        ),
+        last_href: last_page.map(|page| p.href(tax, p.sort, page, true)),
         show_incomplete: SEGMENT_HEALTH_CHECK_AVAILABLE,
         chips: p.chips(tax),
         more_open: p.any_secondary(),
@@ -1872,5 +1876,301 @@ mod tests {
         assert_eq!(row.meter_state, "ok");
         assert!(row.flags.is_empty());
         assert_eq!(r.missing_segment_count, 3);
+    }
+}
+
+#[cfg(test)]
+mod hb6_regressions {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use nzb_search::request::SearchPage;
+    use nzb_store::{KeysetPage, Page, SearchDoc, SearchIndex};
+    use tower::ServiceExt as _;
+
+    const LIMIT_NOTICE: &str = "The last page is beyond the supported page range.";
+
+    /// Only the search seam is synthetic: real routing, extraction, view assembly and Askama rendering
+    /// consume a large total with at most one page of rows. This also runs against the unfixed handler.
+    #[derive(Clone)]
+    struct LargeListing {
+        total: Total,
+        seen: Arc<std::sync::Mutex<Vec<SearchQuery>>>,
+    }
+
+    impl LargeListing {
+        fn page(&self, req: &SearchRequest) -> SearchPage {
+            self.seen.lock().unwrap().push(req.query.clone());
+            let count = self
+                .total
+                .value()
+                .saturating_sub(u64::from(req.query.offset))
+                .min(u64::from(req.query.limit));
+            let items = (0..count)
+                .map(|i| ReleaseRow {
+                    id: i64::from(req.query.offset) + i64::try_from(i).unwrap() + 1,
+                    sha256: nzb_core::Sha256([0; 32]),
+                    title: format!("Listing fixture {i}"),
+                    category_id: 5040,
+                    category_overridden: false,
+                    category_source: CategorySource::Fallback,
+                    posted_at: Some(1_700_000_000),
+                    ingested_at: 1_700_000_000,
+                    total_bytes: 2 << 20,
+                    poster: None,
+                    file_count: 1,
+                    segment_count: 1,
+                    missing_segment_count: 0,
+                    par2_blocks: 0,
+                    flags: ReleaseFlags::EMPTY,
+                    nzb_size_bytes: 100,
+                    source_name: None,
+                    source_label: None,
+                    origin: None,
+                    meta_json: None,
+                    scene: nzb_store::SceneColumns::default(),
+                })
+                .collect();
+            SearchPage {
+                items,
+                total: self.total,
+                has_more: u64::from(req.query.offset).saturating_add(count) < self.total.value(),
+                limit: req.query.limit,
+                facets: Vec::new(),
+                narrowed: false,
+                fuzzy_fallback: false,
+                dropped: 0,
+            }
+        }
+    }
+
+    impl SearchIndex for LargeListing {
+        fn search(
+            &self,
+            _: &SearchQuery,
+        ) -> impl Future<Output = Result<Page<ReleaseRow>, StoreError>> {
+            std::future::ready(Err(StoreError::OutOfRange("unexpected legacy search")))
+        }
+
+        fn search_keyset(
+            &self,
+            _: &SearchQuery,
+            _: SeekDir,
+            _: &PageCursor,
+        ) -> impl Future<Output = Result<KeysetPage, StoreError>> {
+            std::future::ready(Err(StoreError::OutOfRange("unexpected legacy search")))
+        }
+
+        fn count(&self, _: &SearchQuery) -> impl Future<Output = Result<u64, StoreError>> {
+            std::future::ready(Ok(self.total.value()))
+        }
+
+        fn upsert(&self, _: &SearchDoc<'_>) -> impl Future<Output = Result<(), StoreError>> {
+            std::future::ready(Err(StoreError::OutOfRange("read-only listing fixture")))
+        }
+
+        fn remove(&self, _: i64) -> impl Future<Output = Result<(), StoreError>> {
+            std::future::ready(Err(StoreError::OutOfRange("read-only listing fixture")))
+        }
+    }
+
+    impl SearchIndexV3 for LargeListing {
+        fn search_page(
+            &self,
+            req: &SearchRequest,
+        ) -> impl Future<Output = Result<SearchPage, SearchError>> {
+            std::future::ready(Ok(self.page(req)))
+        }
+
+        fn search_keyset_page(
+            &self,
+            req: &SearchRequest,
+            _: SeekDir,
+            _: &PageCursor,
+        ) -> impl Future<Output = Result<SearchPage, SearchError>> {
+            std::future::ready(Ok(self.page(req)))
+        }
+
+        fn count_total(
+            &self,
+            _: &SearchRequest,
+        ) -> impl Future<Output = Result<Total, SearchError>> {
+            std::future::ready(Ok(self.total))
+        }
+    }
+
+    fn listing_app(db: Store, search: LargeListing, per_page: u32) -> Router {
+        let sess = SessionCtx {
+            user_id: 1,
+            stage: nzb_store::SessionStage::Active,
+            csrf_token: String::new(),
+            hidden_categories: Arc::from([]),
+            prefs: nzb_store::UserPrefs {
+                page_size_releases: nzb_store::ReleasePageSize::new(per_page).unwrap(),
+                ..nzb_store::UserPrefs::default()
+            },
+            role: nzb_store::Role::Viewer,
+            username: "listing-reader".to_owned(),
+            display_name: "Listing reader".to_owned(),
+            enroll_proven: false,
+            multi_user: false,
+            id_hash: [0; 32],
+            last_seen_at: 0,
+            created_at: 0,
+            library_gen: Arc::default(),
+        };
+        routes_with_clock(
+            db,
+            search,
+            Arc::new(Taxonomy::builtin().unwrap()),
+            Arc::new(crate::auth::ManualWallClock::new(1_700_000_001)),
+        )
+        .layer(Extension(sess))
+    }
+
+    async fn html(app: &Router, uri: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "listing URI: {uri}");
+        String::from_utf8(
+            to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    /// Read the actual navigation links, not the view's private fields. Returned URLs can be followed
+    /// as an ordinary browser would, without needing JavaScript or generating a large search index.
+    fn pager_links_in(body: &str) -> Vec<(&str, String)> {
+        let pager = body
+            .split_once("<nav class=\"pager\"")
+            .and_then(|(_, rest)| rest.split_once("</nav>"))
+            .map_or("", |(nav, _)| nav);
+        pager
+            .split("<a ")
+            .skip(1)
+            .filter_map(|link| {
+                let (attrs, rest) = link.split_once('>')?;
+                let (label, _) = rest.split_once("</a>")?;
+                let href = attrs.split_once("href=\"")?.1.split_once('"')?.0;
+                // Askama escapes ampersands numerically; a browser decodes both forms.
+                Some((label, href.replace("&#38;", "&").replace("&amp;", "&")))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn last_page_outside_the_accepted_range_is_not_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let tax = Taxonomy::builtin().unwrap();
+        for per_page in nzb_store::ReleasePageSize::CHOICES {
+            for total in [u64::from(MAX_PAGE) * u64::from(*per_page) + 1, u64::MAX] {
+                let search = LargeListing {
+                    total: Total::Exact(total),
+                    seen: Arc::default(),
+                };
+                let app = listing_app(db.store.clone(), search, *per_page);
+                let body = html(&app, "/?q=alpha&sort=size_asc&min_mib=1").await;
+                let links = pager_links_in(&body);
+                assert!(
+                    links.iter().all(|(label, _)| *label != "Last"),
+                    "Last must not link to an unsupported page: total={total}, size={per_page}"
+                );
+                assert!(body.contains(LIMIT_NOTICE));
+                assert!(body.contains("Narrow your search or filters"));
+                assert!(body.contains(&compact_count_exact(total)));
+                let (_, next) = links.iter().find(|(label, _)| *label == "Next").unwrap();
+                let p = parse_params(next.split_once('?').map(|(_, q)| q), &tax).unwrap();
+                assert_eq!(p.q.as_deref(), Some("alpha"));
+                assert_eq!(p.sort, SortKey::SizeAsc);
+                assert_eq!(p.min_mib, Some(1));
+                assert_eq!(p.page, 2);
+                assert!(
+                    p.cursor.is_some(),
+                    "Next must retain its bounded keyset path"
+                );
+                let next_body = html(&app, next).await;
+                assert!(
+                    pager_links_in(&next_body)
+                        .iter()
+                        .any(|(label, _)| *label == "Previous")
+                );
+                assert!(next_body.contains(LIMIT_NOTICE));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn last_page_at_the_limit_still_roundtrips_with_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        for per_page in nzb_store::ReleasePageSize::CHOICES {
+            let search = LargeListing {
+                total: Total::Exact(u64::from(MAX_PAGE) * u64::from(*per_page)),
+                seen: Arc::default(),
+            };
+            let seen = Arc::clone(&search.seen);
+            let app = listing_app(db.store.clone(), search, *per_page);
+            let body = html(
+                &app,
+                "/?cat=tv.hd&from=2020-01-01&to=2024-02-29&sort=size_desc&max_mib=8",
+            )
+            .await;
+            assert!(!body.contains(LIMIT_NOTICE));
+            let links = pager_links_in(&body);
+            let (_, last) = links.iter().find(|(label, _)| *label == "Last").unwrap();
+            let body = html(&app, last).await;
+            assert!(body.contains("Page 100000 of 100000"));
+            assert!(
+                !pager_links_in(&body)
+                    .iter()
+                    .any(|(label, _)| matches!(*label, "Last" | "Next"))
+            );
+            let requests = seen.lock().unwrap();
+            let first = requests.first().unwrap();
+            let last = requests.last().unwrap();
+            assert_eq!(last.offset, (MAX_PAGE - 1) * per_page);
+            assert_eq!(last.limit, *per_page);
+            assert_eq!(last.categories, first.categories);
+            assert_eq!(last.since, first.since);
+            assert_eq!(last.until, first.until);
+            assert_eq!(last.sort, first.sort);
+            assert_eq!(last.max_bytes, first.max_bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn inexact_or_empty_listings_do_not_claim_an_unreachable_last_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        for total in [Total::AtLeast(u64::MAX), Total::Exact(0)] {
+            let app = listing_app(
+                db.store.clone(),
+                LargeListing {
+                    total,
+                    seen: Arc::default(),
+                },
+                25,
+            );
+            let body = html(&app, "/").await;
+            assert!(!body.contains(LIMIT_NOTICE));
+            assert!(
+                !pager_links_in(&body)
+                    .iter()
+                    .any(|(label, _)| *label == "Last")
+            );
+            assert_eq!(
+                body.contains("more than"),
+                matches!(total, Total::AtLeast(_))
+            );
+        }
     }
 }

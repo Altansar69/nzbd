@@ -124,7 +124,7 @@
 {% if let Some(h) = prev_href %}<a rel="prev" href="{{ h }}">Previous</a>{% else %}<span class="muted">Previous</span>{% endif %}
 {% if pages_known %}<span>Page {{ page }} of {{ pages }}</span>{% else %}<span>Page {{ page }}</span>{% endif %}
 {% if let Some(h) = next_href %}<a rel="next" href="{{ h }}">Next</a>{% else %}<span class="muted">Next</span>{% endif %}
-{% if pages_known && (prev_href.is_some() || next_href.is_some()) %}{% if next_href.is_some() %}<a href="{{ last_href }}">Last</a>{% else %}<span class="muted">Last</span>{% endif %}{% endif %}
+{% if pages_known && (prev_href.is_some() || next_href.is_some()) %}{% if next_href.is_some() %}{% if let Some(h) = last_href %}<a href="{{ h }}">Last</a>{% else %}<span class="muted">Last</span>{% endif %}{% else %}<span class="muted">Last</span>{% endif %}{% endif %}
 </nav>
 <form method="post" action="/page-size" class="perpage" aria-label="Releases per page">
 {% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
