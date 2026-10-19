@@ -1708,26 +1708,28 @@ fn path_with_suffix(p: &Path, suffix: &str) -> PathBuf {
 #[must_use]
 pub fn gather_fs(cfg: &Config) -> FsFacts {
     let p = &cfg.paths;
-    // The database directory is probed unless it is the watch folder itself.
-    let db_dir =
-        p.db.parent()
-            .filter(|d| !d.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-    let same_dir = |a: &Path, b: &Path| matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
-    let db_probe = if same_dir(db_dir, &p.watch) {
-        Probe::Access
-    } else {
-        Probe::Write
-    };
-    let dirs = vec![
+    let mut dirs = vec![
         dir_facts("Watch folder", &p.watch, Probe::Access),
         dir_facts("Blob store", &p.store, Probe::WriteIn(".tmp")),
         dir_facts("Failed folder", &p.failed, Probe::Write),
         dir_facts("Duplicates folder", &p.duplicates, Probe::Write),
         dir_facts("Upload staging folder", &p.tmp, Probe::Write),
         dir_facts("Backups folder", &p.backups, Probe::Write),
-        dir_facts("Database folder", db_dir, db_probe),
     ];
+    if cfg.db.backend == nzb_store::DbBackend::Sqlite {
+        // The SQLite directory is probed unless it is the watch folder itself.
+        let db_dir =
+            p.db.parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+        let same_dir = |a: &Path, b: &Path| matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+        let db_probe = if same_dir(db_dir, &p.watch) {
+            Probe::Access
+        } else {
+            Probe::Write
+        };
+        dirs.push(dir_facts("Database folder", db_dir, db_probe));
+    }
     let dev = |d: &Path| fs::metadata(d).map(|m| m.dev()).ok();
     let same_fs = match (dev(&p.watch), dev(&p.store), dev(&p.failed)) {
         (Some(a), Some(b), Some(c)) => Some(a == b && b == c),
@@ -1737,14 +1739,21 @@ pub fn gather_fs(cfg: &Config) -> FsFacts {
         .into_iter()
         .filter_map(|d| count_dir(d, &|n, _| is_leftover(n)).ok())
         .fold(0usize, |a, c| a.saturating_add(c.n));
+    let (db_bytes, wal_bytes) = match cfg.db.backend {
+        nzb_store::DbBackend::Sqlite => (
+            fs::metadata(&p.db).map(|m| m.len()).ok(),
+            match fs::metadata(path_with_suffix(&p.db, "-wal")) {
+                Ok(m) => Some(m.len()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
+                Err(_) => None,
+            },
+        ),
+        nzb_store::DbBackend::Postgres => (None, None),
+    };
     FsFacts {
         dirs,
-        db_bytes: fs::metadata(&p.db).map(|m| m.len()).ok(),
-        wal_bytes: match fs::metadata(path_with_suffix(&p.db, "-wal")) {
-            Ok(m) => Some(m.len()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Some(0),
-            Err(_) => None,
-        },
+        db_bytes,
+        wal_bytes,
         same_fs,
         layout_ok: cfg.check_layout().is_ok(),
         anchor_same_fs: crate::library::anchor_shares_filesystem(cfg),
@@ -2719,5 +2728,167 @@ mod metrics_backend_regressions {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod health_backend_regressions {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use std::io::{Read as _, Write as _};
+
+    const DB_SENTINEL: &[u8] = b"unrelated local database file";
+    const WAL_SENTINEL: &[u8] = b"unrelated local journal";
+
+    fn filesystem_config(root: &Path) -> Config {
+        let mut cfg = Config::default();
+        for (slot, name) in [
+            (&mut cfg.paths.watch, "watch"),
+            (&mut cfg.paths.store, "store"),
+            (&mut cfg.paths.failed, "failed"),
+            (&mut cfg.paths.duplicates, "duplicates"),
+            (&mut cfg.paths.tmp, "tmp"),
+            (&mut cfg.paths.backups, "backups"),
+        ] {
+            *slot = root.join(name);
+            fs::create_dir(&*slot).unwrap();
+        }
+        fs::create_dir(root.join("store/.tmp")).unwrap();
+        for name in ["sqlite-only", "state", "index"] {
+            fs::create_dir(root.join(name)).unwrap();
+        }
+        cfg.paths.db = root.join("sqlite-only/unused.sqlite");
+        cfg.paths.state = Some(root.join("state"));
+        cfg.search.index_dir = Some(root.join("index"));
+        cfg.security.totp_key_file = root.join("unused-test-key");
+        cfg
+    }
+
+    fn health_checks(cfg: &Config, facts: FsFacts) -> Vec<Check> {
+        // Connection facts are held constant: this regression exercises real filesystem
+        // collection and the public health evaluator, not a PostgreSQL connection fixture.
+        build(&Inputs {
+            now: 1_800_000_000,
+            uptime: None,
+            live: None,
+            dev_tools: false,
+            debug_build: false,
+            cfg: CfgFacts::of(cfg),
+            proc: ProcFacts::default(),
+            db: Some(DbFacts {
+                writer_ok: true,
+                reader_ok: true,
+                schema: None,
+                totals: None,
+                logs: None,
+                pools: PoolInfo {
+                    writer_open: 1,
+                    readers_open: 1,
+                    readers_idle: 1,
+                    readers_max: 1,
+                    closed: false,
+                },
+                security: None,
+                last_ok_ingest: None,
+                audit_chain: None,
+                outbox: None,
+            }),
+            fs: facts,
+            recovery: None,
+            deep: None,
+            http_probe: None,
+        })
+    }
+
+    fn file_rows(checks: Vec<Check>) -> Vec<Check> {
+        checks
+            .into_iter()
+            .filter(|check| matches!(check.name, "Database file size" | "WAL file size"))
+            .collect()
+    }
+
+    #[test]
+    fn filesystem_health_belongs_to_selected_database_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = filesystem_config(dir.path());
+        let wal_path = path_with_suffix(&cfg.paths.db, "-wal");
+        fs::write(&cfg.paths.db, DB_SENTINEL).unwrap();
+        let mut wal = fs::File::create(&wal_path).unwrap();
+        wal.write_all(WAL_SENTINEL).unwrap();
+        // A sparse file crosses the real warning threshold without allocating 256 MiB.
+        wal.set_len(WAL_WARN_BYTES + 1).unwrap();
+        drop(wal);
+        let db_meta = fs::metadata(&cfg.paths.db).unwrap();
+        let wal_meta = fs::metadata(&wal_path).unwrap();
+
+        cfg.db.backend = nzb_store::DbBackend::Sqlite;
+        let sqlite_fs = gather_fs(&cfg);
+        assert_eq!(
+            (sqlite_fs.db_bytes, sqlite_fs.wal_bytes),
+            (Some(db_meta.len()), Some(wal_meta.len()))
+        );
+        assert!(sqlite_fs.dirs.iter().any(|d| d.name == "Database folder"));
+        let sqlite_checks = health_checks(&cfg, sqlite_fs);
+        assert!(sqlite_checks.iter().any(|c| c.name == "Database folder"));
+        let sqlite_rows = file_rows(sqlite_checks);
+        assert_eq!(sqlite_rows.len(), 2);
+        let sqlite_wal = sqlite_rows
+            .iter()
+            .find(|c| c.name == "WAL file size")
+            .expect("SQLite must retain its real WAL row");
+        assert_eq!(sqlite_wal.status, Status::Warn);
+        assert_eq!(sqlite_wal.value, human_bytes(wal_meta.len()));
+        let sqlite_summary = nzb_web::health::Summary::of(&sqlite_rows);
+        assert_eq!((sqlite_summary.warnings, sqlite_summary.failures), (1, 0));
+        assert_eq!(sqlite_summary.exit_code(), 1);
+        assert!(render_text(&sqlite_rows).contains("Restart the server to checkpoint."));
+
+        cfg.db.backend = nzb_store::DbBackend::Postgres;
+        let pg_fs = gather_fs(&cfg);
+        let pg_sizes = (pg_fs.db_bytes, pg_fs.wal_bytes);
+        let pg_has_directory = pg_fs.dirs.iter().any(|d| d.name == "Database folder");
+        let pg_checks = health_checks(&cfg, pg_fs);
+        let pg_has_directory_row = pg_checks.iter().any(|c| c.name == "Database folder");
+        let pg_rows = file_rows(pg_checks);
+        let pg_summary = nzb_web::health::Summary::of(&pg_rows);
+
+        assert_eq!(fs::read(&cfg.paths.db).unwrap(), DB_SENTINEL);
+        let mut journal_prefix = [0; WAL_SENTINEL.len()];
+        fs::File::open(&wal_path)
+            .unwrap()
+            .read_exact(&mut journal_prefix)
+            .unwrap();
+        assert_eq!(journal_prefix, WAL_SENTINEL);
+        let after_db = fs::metadata(&cfg.paths.db).unwrap();
+        let after_wal = fs::metadata(&wal_path).unwrap();
+        assert_eq!(after_db.len(), db_meta.len());
+        assert_eq!(after_wal.len(), wal_meta.len());
+        assert_eq!(after_db.modified().unwrap(), db_meta.modified().unwrap());
+        assert_eq!(after_wal.modified().unwrap(), wal_meta.modified().unwrap());
+        assert_eq!(
+            fs::read_dir(dir.path().join("sqlite-only"))
+                .unwrap()
+                .count(),
+            2
+        );
+
+        assert_eq!(
+            pg_sizes,
+            (None, None),
+            "PostgreSQL health must not report unrelated SQLite file sizes"
+        );
+        assert!(
+            !pg_has_directory && !pg_has_directory_row,
+            "PostgreSQL health must not probe the unrelated SQLite database directory"
+        );
+        assert!(
+            pg_rows
+                .iter()
+                .all(|c| c.status == Status::Info && c.value == "n/a")
+        );
+        assert_eq!((pg_summary.warnings, pg_summary.failures), (0, 0));
+        assert_eq!(pg_summary.exit_code(), 0);
+        assert!(!render_text(&pg_rows).contains("checkpoint"));
     }
 }
