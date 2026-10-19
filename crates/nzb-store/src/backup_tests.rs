@@ -503,3 +503,60 @@ async fn sec_094_backup_omits_sessions_and_throttle_state() {
         pool.close().await;
     }
 }
+
+/// Plain and encrypted backups must retain the latest database state after a clock correction.
+pub(crate) async fn clock_rollback_retains_latest_backup(key: Option<&crate::BackupKey>) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir).await;
+    let now = 1_700_000_000;
+    for keep in [0_usize, 1, 2] {
+        let backups = dir.path().join(format!("backups-{keep}"));
+        fs::create_dir(&backups).unwrap();
+        let older = db
+            .backup_with(&backups, now + 200, keep, key)
+            .await
+            .unwrap();
+        let future = db
+            .backup_with(&backups, now + 300, keep, key)
+            .await
+            .unwrap();
+        let marker = format!("latest-after-clock-rollback-{keep}");
+        db.audit_event(now, Some("cli"), "download", Some(&marker), None)
+            .await
+            .unwrap();
+        let latest = db.backup_with(&backups, now, keep, key).await.unwrap();
+        assert!(
+            latest.path.is_file(),
+            "rotation deleted the just-published backup after clock rollback (keep={keep})"
+        );
+        assert_eq!(crate::looks_encrypted(&latest.path), key.is_some());
+        assert_eq!(fs::read_dir(&backups).unwrap().count(), keep.max(1));
+        assert_eq!(latest.rotated, 1);
+        assert!(!older.path.exists());
+        assert_eq!(future.path.exists(), keep == 2);
+
+        // Restore the returned path, not an earlier surviving filename: only this snapshot has
+        // the marker written after the future-dated backups.
+        let restored = dir.path().join(format!("restored-{keep}.sqlite"));
+        if let Some(key) = key {
+            crate::decrypt_file(key, &latest.path, &restored).unwrap();
+        } else {
+            fs::copy(&latest.path, &restored).unwrap();
+        }
+        let restored = SqliteDb::open(&DbConfig { path: restored }).await.unwrap();
+        restored.integrity_check().await.unwrap();
+        let detail: String =
+            sqlx::query_scalar("SELECT detail FROM audit_log ORDER BY id DESC LIMIT 1")
+                .fetch_one(restored.readers())
+                .await
+                .unwrap();
+        assert_eq!(detail, marker);
+        restored.close().await;
+    }
+    db.close().await;
+}
+
+#[tokio::test]
+async fn sec_044_clock_rollback_keeps_latest_plain_backup() {
+    clock_rollback_retains_latest_backup(None).await;
+}

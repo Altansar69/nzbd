@@ -245,20 +245,22 @@ fn open_new_0600(p: &Path) -> Result<File, StoreError> {
         .open(p)?)
 }
 
-fn rotate(dir: &Path, keep: usize) -> Result<usize, StoreError> {
+fn rotate(dir: &Path, keep: usize, published: &str) -> Result<usize, StoreError> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if is_snapshot_name(&name) && entry.file_type()?.is_file() {
+        if name != published && is_snapshot_name(&name) && entry.file_type()?.is_file() {
             names.push(name);
         }
     }
+    // Keep the just-published snapshot even if its timestamp precedes earlier runs after a clock
+    // rollback. The remaining slots retain the existing newest-name-first ordering.
     names.sort_unstable_by(|a, b| b.cmp(a));
     let mut removed = 0;
-    for name in names.iter().skip(keep.max(1)) {
+    for name in names.iter().skip(keep.saturating_sub(1)) {
         fs::remove_file(dir.join(name))?;
         removed += 1;
     }
@@ -351,7 +353,7 @@ impl PgDb {
             let _ = fs::remove_file(&enc_tmp);
             return Err(e);
         }
-        let rotated = rotate(dir, keep)?;
+        let rotated = rotate(dir, keep, &final_name)?;
         Ok(SnapshotReport {
             path: dest,
             rotated,

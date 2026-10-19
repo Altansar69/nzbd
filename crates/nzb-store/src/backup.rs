@@ -213,7 +213,7 @@ async fn backup_pool(
         }
     }
     res?;
-    let rotated = rotate(dir, keep)?;
+    let rotated = rotate(dir, keep, &final_name)?;
     Ok(BackupReport {
         path: dest,
         rotated,
@@ -346,8 +346,8 @@ fn open_new_0600(p: &Path) -> Result<File, StoreError> {
     Ok(o.open(p)?)
 }
 
-/// Delete all but the newest `keep` (min 1) generated-name backups.
-fn rotate(dir: &Path, keep: usize) -> Result<usize, StoreError> {
+/// Keep the published backup and the newest `keep - 1` other generated-name backups (min 1 total).
+fn rotate(dir: &Path, keep: usize, published: &str) -> Result<usize, StoreError> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -355,28 +355,39 @@ fn rotate(dir: &Path, keep: usize) -> Result<usize, StoreError> {
             continue;
         };
         // Regular files only (file_type does not follow symlinks).
-        if is_backup_name(&name) && entry.file_type()?.is_file() {
+        if name != published && is_backup_name(&name) && entry.file_type()?.is_file() {
             names.push(name);
         }
     }
-    // Fixed-width UTC timestamps sort chronologically as strings.
+    // A clock rollback must not delete the snapshot we just published. The remaining fixed-width
+    // UTC timestamps sort chronologically as strings, preserving the existing retention order.
     names.sort_unstable_by(|a, b| b.cmp(a));
     let mut removed = 0;
-    for name in names.iter().skip(keep.max(1)) {
+    for name in names.iter().skip(keep.saturating_sub(1)) {
         fs::remove_file(dir.join(name))?;
         removed += 1;
     }
     Ok(removed)
 }
 
-/// Remove stale temp files of crashed runs (exact generated pattern only).
+/// Exact temporary names created by backup, including the plaintext copy's rollback journal.
+fn is_backup_tmp_name(name: &str) -> bool {
+    let (name, journal) = name
+        .strip_suffix("-journal")
+        .map_or((name, false), |base| (base, true));
+    name.strip_prefix('.')
+        .and_then(|s| s.strip_suffix(TMP_SUFFIX))
+        .is_some_and(|base| is_backup_name(base) && (!journal || !base.ends_with(ENC_SUFFIX)))
+}
+
+/// Remove stale temp files of crashed runs (exact generated pattern only). A crash during
+/// `strip_copy` can leave old credential pages in the plaintext SQLite rollback journal, even
+/// when the intended backup was encrypted. Encrypted files themselves never have a journal.
 fn clean_stale_tmp(dir: &Path) -> Result<(), StoreError> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if let Some(n) = entry.file_name().to_str()
-            && n.strip_prefix('.')
-                .and_then(|s| s.strip_suffix(TMP_SUFFIX))
-                .is_some_and(is_backup_name)
+            && is_backup_tmp_name(n)
             && entry.file_type()?.is_file()
         {
             fs::remove_file(entry.path())?;

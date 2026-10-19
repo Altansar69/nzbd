@@ -623,3 +623,71 @@ async fn sec_044_backup_files_are_0600_and_rotated() {
     );
     let _ = paths;
 }
+
+/// Plain and encrypted snapshots must retain the latest database state after a clock correction.
+pub(crate) async fn clock_rollback_retains_latest_backup(key: Option<&BackupKey>) {
+    let source = TestDb::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    for keep in [0_usize, 1, 2] {
+        let backups = dir.path().join(format!("backups-{keep}"));
+        std::fs::create_dir(&backups).unwrap();
+        let older = source
+            .db
+            .snapshot_backup(&backups, T0 + 200, keep, key)
+            .await
+            .unwrap();
+        let future = source
+            .db
+            .snapshot_backup(&backups, T0 + 300, keep, key)
+            .await
+            .unwrap();
+        let marker = format!("latest-after-clock-rollback-{keep}");
+        source
+            .db
+            .audit_event(T0, Some("cli"), "download", Some(&marker), None)
+            .await
+            .unwrap();
+        let latest = source
+            .db
+            .snapshot_backup(&backups, T0, keep, key)
+            .await
+            .unwrap();
+        assert!(
+            latest.path.is_file(),
+            "rotation deleted the just-published backup after clock rollback (keep={keep})"
+        );
+        assert_eq!(crate::looks_encrypted(&latest.path), key.is_some());
+        assert_eq!(std::fs::read_dir(&backups).unwrap().count(), keep.max(1));
+        assert_eq!(latest.rotated, 1);
+        assert!(!older.path.exists());
+        assert_eq!(future.path.exists(), keep == 2);
+
+        // The returned snapshot alone contains the marker added after the future-dated files.
+        let target = TestDb::new().await;
+        let restored = restore_snapshot(
+            target.owner_options(),
+            &latest.path,
+            dir.path(),
+            RestoreOptions {
+                key,
+                allow_unencrypted: false,
+            },
+            T0 + 1,
+        )
+        .await
+        .unwrap();
+        assert!(restored.audit_chain_ok);
+        assert_eq!(restored.tables, latest.tables);
+        let detail: String =
+            sqlx::query_scalar("SELECT detail FROM audit_log ORDER BY id DESC LIMIT 1")
+                .fetch_one(target.db.web())
+                .await
+                .unwrap();
+        assert_eq!(detail, marker);
+    }
+}
+
+#[tokio::test]
+async fn sec_044_clock_rollback_keeps_latest_plain_backup() {
+    clock_rollback_retains_latest_backup(None).await;
+}
