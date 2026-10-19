@@ -26,6 +26,9 @@ hmac = "0.12"
 # `Body` trait for the permit-holding download body (already in the lockfile via axum/hyper).
 http-body = "1"
 http-body-util = "0.1.5"
+# Configure the existing HTTP/1 parser's header timer and bounded buffers (already locked).
+hyper = { version = "1.12.0", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
 # Upload pipeline handle/Job types (T051); workspace-internal.
 nzb-ingest = { version = "0.5.1", path = "../nzb-ingest" }
 nzb-core = { version = "0.5.1", path = "../nzb-core" }
@@ -57,7 +60,7 @@ nzb-search = { version = "0.5.1", path = "../nzb-search", features = ["test-supp
 # The backend matrix (NZBD_TEST_BACKEND, no default) and the Postgres test harness (T122).
 nzb-store = { version = "0.5.1", path = "../nzb-store", features = ["pg-test-support"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
-tokio = { version = "1.53.2", features = ["rt", "macros", "time", "net", "io-util"] }
+tokio = { version = "1.53.2", features = ["rt", "macros", "time", "net", "io-util", "test-util"] }
 # Same sqlx as nzb-store (tests flip user columns directly).
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tempfile = "3.27.0"

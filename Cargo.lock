@@ -1670,6 +1670,8 @@ dependencies = [
  "hmac",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "nzb-core",
  "nzb-ingest",
  "nzb-search",

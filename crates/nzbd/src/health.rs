@@ -253,7 +253,7 @@ pub struct DeepSummary {
     pub at: i64,
     /// Releases whose blob is missing.
     pub missing: usize,
-    /// The run covered only part of the releases.
+    /// The release/store comparison was incomplete (cap, timeout, or read error).
     pub partial: bool,
     /// Database integrity checks passed.
     pub db_ok: bool,
@@ -1139,15 +1139,18 @@ pub fn deep_summary_check(d: Option<DeepSummary>, now: i64) -> Check {
             format!("{} missing blob(s); {}", d.missing, fmt_age(now, d.at)),
             "Run `nzbd store verify` on the host and restore the missing NZBs.",
         ),
+        Some(d) if d.partial => mk(
+            Group::Storage,
+            name,
+            Status::Warn,
+            format!("incomplete check; {}", fmt_age(now, d.at)),
+            "The last comparison could not cover every release. Run the deep check again or use `nzbd store verify` on the host.",
+        ),
         Some(d) => mk(
             Group::Storage,
             name,
             Status::Ok,
-            format!(
-                "consistent{}; {}",
-                if d.partial { " (partial run)" } else { "" },
-                fmt_age(now, d.at)
-            ),
+            format!("consistent; {}", fmt_age(now, d.at)),
             "",
         ),
     }
@@ -1974,9 +1977,15 @@ impl Engine {
     }
 
     /// The deep, on-demand checks. Read-only: a reader connection, a passive store handle (it
-    /// never touches `.tmp/`), `stat`/`read_dir` and a dry-run GC plan.
-    #[allow(clippy::too_many_lines)] // one linear sequence of independent checks
+    /// never touches `.tmp/`), `stat`/`read_dir` and a dry-run GC plan. The web monitor bounds
+    /// the displayed response while this collector retains ownership until filesystem work
+    /// actually finishes; an operating-system filesystem call cannot be cancelled safely.
     pub async fn deep(&self, now: i64) -> Vec<Check> {
+        self.deep_with_fs_timeout(now, DEEP_FS_DEADLINE).await
+    }
+
+    #[allow(clippy::too_many_lines)] // one linear sequence of independent checks
+    async fn deep_with_fs_timeout(&self, now: i64, fs_timeout: Duration) -> Vec<Check> {
         let g = Group::Deep;
         let mut v = Vec::new();
         let Some(db) = self.db.clone() else {
@@ -2041,7 +2050,9 @@ impl Engine {
         let failed_dir = self.cfg.paths.failed.clone();
         let shas = db.release_shas_limited(DEEP_RELEASE_CAP).await;
         let mut missing = 0usize;
-        let mut partial = false;
+        // Only a completed comparison may claim consistency. Errors and unfinished walks
+        // remain visible in the cheap summary after the detailed rows have expired.
+        let mut partial = true;
         match shas {
             Err(_) => v.push(mk(
                 g,
@@ -2051,17 +2062,17 @@ impl Engine {
                 "See the server log.",
             )),
             Ok((set, was_partial)) => {
-                partial = was_partial;
                 let looked = set.len();
                 let dir = store_dir.clone();
                 let res = tokio::task::spawn_blocking(move || {
-                    deep_store_blocking(&dir, set, Instant::now() + DEEP_FS_DEADLINE)
+                    deep_store_blocking(&dir, set, Instant::now() + fs_timeout)
                 })
                 .await
                 .unwrap_or(Err(()));
                 match res {
                     Ok(s) => {
                         missing = s.missing;
+                        partial = was_partial || s.timed_out;
                         v.push(store_lookup_check(
                             looked,
                             s.missing,
@@ -2134,24 +2145,27 @@ impl Engine {
                 "Run `nzbd store gc` on the host for a full plan.",
             );
         }
-        let planned = {
-            if !store_dir.join(".tmp").is_dir() {
-                return mk(g, name, Status::Warn, "store not initialised", "");
+        let dir = store_dir.to_path_buf();
+        let opened = tokio::task::spawn_blocking(move || {
+            if !dir.join(".tmp").is_dir() {
+                return Err("store not initialised");
             }
-            let Ok(store) = FsStore::open_passive(store_dir) else {
-                return mk(g, name, Status::Warn, "store could not be opened", "");
-            };
-            tokio::time::timeout(
-                DEEP_FS_DEADLINE,
-                ing::gc_plan(db, &store, now, ing::DEFAULT_GC_GRACE_SECS),
-            )
-            .await
+            FsStore::open_passive(&dir).map_err(|_| "store could not be opened")
+        })
+        .await;
+        let store = match opened {
+            Ok(Ok(store)) => store,
+            Ok(Err(reason)) => return mk(g, name, Status::Warn, reason, ""),
+            Err(_) => return mk(g, name, Status::Warn, "store could not be opened", ""),
         };
-        match planned {
-            Ok(Ok(plan)) if plan.candidates.is_empty() => {
+        // gc_plan awaits a blocking filesystem walk. An inner timeout would detach that
+        // walk and let the outer collector release its permit too early. The web monitor
+        // publishes its deadline independently while this owned collector awaits real completion.
+        match ing::gc_plan(db, &store, now, ing::DEFAULT_GC_GRACE_SECS).await {
+            Ok(plan) if plan.candidates.is_empty() => {
                 mk(g, name, Status::Ok, "none older than 24 h", "")
             }
-            Ok(Ok(plan)) => mk(
+            Ok(plan) => mk(
                 g,
                 name,
                 Status::Warn,
@@ -2245,7 +2259,7 @@ fn deep_store_blocking(
     let all: Vec<_> = shas.into_iter().collect();
     let (mut missing, mut timed_out) = (0usize, false);
     for chunk in all.chunks(1000) {
-        if Instant::now() > deadline {
+        if Instant::now() >= deadline {
             timed_out = true;
             break;
         }
@@ -2461,3 +2475,165 @@ fn cli_report(cfg: &Config) -> Result<(String, u8), String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod resource_followup_tests {
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000;
+
+    #[test]
+    fn incomplete_deep_summary_never_claims_consistency() {
+        let summary = DeepSummary {
+            at: NOW,
+            missing: 0,
+            partial: true,
+            db_ok: true,
+        };
+        let check = deep_summary_check(Some(summary), NOW + 1);
+        assert_eq!(
+            check.status,
+            Status::Warn,
+            "incomplete store checks must not be healthy"
+        );
+        assert!(!check.value.contains("consistent"));
+        assert!(check.value.contains("incomplete"));
+        let complete = DeepSummary {
+            partial: false,
+            ..summary
+        };
+        assert_eq!(deep_summary_check(Some(complete), NOW).status, Status::Ok);
+        assert_eq!(
+            deep_summary_check(
+                Some(DeepSummary {
+                    missing: 1,
+                    ..summary
+                }),
+                NOW
+            )
+            .status,
+            Status::Fail
+        );
+        assert_eq!(
+            deep_summary_check(
+                Some(DeepSummary {
+                    db_ok: false,
+                    ..summary
+                }),
+                NOW
+            )
+            .status,
+            Status::Fail
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_store_does_not_publish_a_consistent_deep_summary() {
+        use nzb_store::{CategorySource, NewRelease, NzbStore, SceneColumns};
+        use sha2::Digest as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ts = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let mut cfg = Config::default();
+        cfg.paths.store = dir.path().join("store");
+        cfg.paths.failed = dir.path().join("failed");
+        fs::create_dir(&cfg.paths.failed).unwrap();
+        let store = FsStore::open(&cfg.paths.store).unwrap();
+        let bytes = b"health timeout fixture";
+        let sha = nzb_core::Sha256(sha2::Sha256::digest(bytes).into());
+        store.put(sha, bytes).await.unwrap();
+        let analysis = nzb_core::Analysis {
+            sha256: sha,
+            name_candidates: Vec::new(),
+            meta_name_candidates: 0,
+            title: "health timeout fixture".to_owned(),
+            poster: None,
+            posted_at: None,
+            total_bytes: 0,
+            file_count: 0,
+            segment_count: 0,
+            duplicate_segments: 0,
+            par2_blocks: 0,
+            flags: nzb_core::ReleaseFlags::EMPTY,
+            meta_category: None,
+            repairable_estimate: None,
+            files: Vec::new(),
+        };
+        ts.store
+            .insert_release(&NewRelease {
+                analysis: &analysis,
+                nzb_size_bytes: u64::try_from(bytes.len()).unwrap(),
+                source_name: None,
+                source_label: None,
+                category_id: 8010,
+                category_source: CategorySource::Fallback,
+                meta_json: None,
+                scene: SceneColumns::default(),
+                ingested_at: NOW,
+            })
+            .await
+            .unwrap();
+        let engine = Engine::offline(&cfg, Some(ts.store.clone()), false);
+        let checks = engine.deep_with_fs_timeout(NOW, Duration::ZERO).await;
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name == "Releases vs store" && c.value.contains("incomplete run"))
+        );
+        let summary = *engine
+            .last_deep
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let check = deep_summary_check(summary, NOW + 601);
+        assert_eq!(
+            check.status,
+            Status::Warn,
+            "timed out store traversal was recorded as consistent"
+        );
+        assert!(!check.value.contains("consistent"));
+        engine.deep(NOW + 602).await;
+        let summary = *engine
+            .last_deep
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(deep_summary_check(summary, NOW + 603).status, Status::Ok);
+    }
+
+    #[tokio::test]
+    async fn unreadable_store_does_not_publish_a_consistent_deep_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let mut cfg = Config::default();
+        cfg.paths.store = dir.path().join("uninitialized-store");
+        cfg.paths.failed = dir.path().join("failed");
+        fs::create_dir(&cfg.paths.store).unwrap();
+        fs::create_dir(&cfg.paths.failed).unwrap();
+        let engine = Engine::offline(&cfg, Some(ts.store.clone()), false);
+        let checks = engine.deep(NOW).await;
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name == "Releases vs store" && c.value == "store could not be read")
+        );
+        let summary = *engine
+            .last_deep
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let check = deep_summary_check(summary, NOW + 601);
+        assert_eq!(
+            check.status,
+            Status::Warn,
+            "failed store traversal was recorded as consistent"
+        );
+        assert!(!check.value.contains("consistent"));
+        // Recovering the store makes a subsequent complete check healthy again.
+        let _store = FsStore::open(&cfg.paths.store).unwrap();
+        engine.deep(NOW + 602).await;
+        let summary = *engine
+            .last_deep
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(deep_summary_check(summary, NOW + 603).status, Status::Ok);
+    }
+}
