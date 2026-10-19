@@ -52,8 +52,12 @@ async fn populate(e: &Env) -> (i64, i64) {
     (admin, uploader)
 }
 
+// Callers supply count queries over literal fixture tables, never application input.
 async fn n(db: &PgDb, sql: &str) -> i64 {
-    sqlx::query_scalar(sql).fetch_one(db.web()).await.unwrap()
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
+        .fetch_one(db.web())
+        .await
+        .unwrap()
 }
 
 fn key() -> BackupKey {

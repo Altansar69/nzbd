@@ -15,32 +15,31 @@ This inventory uses the Linux production dependency tree of `nzbd` (normal and b
 for exact versions and declared licences. Local workspace crates and dependencies used only by tests or optional
 features absent from that tree are excluded. Each name/version pair is counted once.
 
-288 crates, by licence:
+293 crates, by licence:
 
 | Licence | Crates |
 |---|---|
-| MIT OR Apache-2.0 | 156 |
+| MIT OR Apache-2.0 | 162 |
 | MIT | 56 |
-| Apache-2.0 OR MIT | 19 |
+| Apache-2.0 OR MIT | 21 |
 | Unicode-3.0 | 18 |
-| MIT/Apache-2.0 | 8 |
+| MIT/Apache-2.0 | 7 |
 | Apache-2.0 | 5 |
 | Unlicense/MIT | 4 |
 | Unlicense OR MIT | 3 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 2 |
 | ISC | 2 |
-| Zlib | 2 |
 | (Apache-2.0 OR MIT) AND BSD-3-Clause | 1 |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 1 |
 | Apache-2.0 / MIT | 1 |
 | Apache-2.0 / MIT / MPL-2.0 | 1 |
-| Apache-2.0 OR BSL-1.0 | 1 |
 | Apache-2.0 OR BSL-1.0 OR MIT | 1 |
 | Apache-2.0/MIT | 1 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 1 |
 | BSD-3-Clause | 1 |
 | CC0-1.0 | 1 |
 | MIT AND BSD-3-Clause | 1 |
+| Zlib | 1 |
 | Zlib OR Apache-2.0 OR MIT | 1 |
 | zlib-acknowledgement OR MIT | 1 |
 
@@ -75,6 +74,7 @@ Full list (name, version, licence):
 | bitpacking | 0.9.3 | MIT |
 | blake2 | 0.10.6 | MIT OR Apache-2.0 |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 |
+| block-buffer | 0.12.1 | MIT OR Apache-2.0 |
 | bon | 3.10.2 | MIT OR Apache-2.0 |
 | bon-macros | 3.10.2 | MIT OR Apache-2.0 |
 | byteorder | 1.5.0 | Unlicense OR MIT |
@@ -82,6 +82,7 @@ Full list (name, version, licence):
 | cc | 1.6.0 | MIT OR Apache-2.0 |
 | census | 0.4.2 | MIT |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 |
 | chacha20 | 0.9.1 | Apache-2.0 OR MIT |
 | chacha20poly1305 | 0.10.1 | Apache-2.0 OR MIT |
 | cipher | 0.4.4 | MIT OR Apache-2.0 |
@@ -89,9 +90,11 @@ Full list (name, version, licence):
 | clap_builder | 4.6.7 | MIT OR Apache-2.0 |
 | clap_derive | 4.6.7 | MIT OR Apache-2.0 |
 | clap_lex | 1.1.1 | MIT OR Apache-2.0 |
+| cmov | 0.5.4 | Apache-2.0 OR MIT |
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 |
 | core_detect | 1.0.0 | MIT/Apache-2.0 |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 |
 | crc | 3.4.0 | MIT OR Apache-2.0 |
 | crc-catalog | 2.5.0 | MIT OR Apache-2.0 |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 |
@@ -102,12 +105,15 @@ Full list (name, version, licence):
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 |
 | crunchy | 0.2.4 | MIT |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 |
+| crypto-common | 0.2.2 | MIT OR Apache-2.0 |
+| ctutils | 0.4.3 | Apache-2.0 OR MIT |
 | darling | 0.24.1 | MIT |
 | darling_core | 0.24.1 | MIT |
 | darling_macro | 0.24.1 | MIT |
 | datasketches | 0.5.0 | Apache-2.0 |
 | deranged | 0.5.9 | MIT OR Apache-2.0 |
 | digest | 0.10.7 | MIT OR Apache-2.0 |
+| digest | 0.11.3 | MIT OR Apache-2.0 |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 |
 | dotenvy | 0.15.7 | MIT |
 | downcast-rs | 2.0.2 | MIT OR Apache-2.0 |
@@ -120,9 +126,8 @@ Full list (name, version, licence):
 | fastdivide | 0.4.2 | zlib-acknowledgement OR MIT |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT |
 | find-msvc-tools | 0.1.14 | MIT OR Apache-2.0 |
-| flume | 0.11.1 | Apache-2.0/MIT |
+| flume | 0.12.0 | Apache-2.0/MIT |
 | fnv | 1.0.7 | Apache-2.0 / MIT |
-| foldhash | 0.1.5 | Zlib |
 | foldhash | 0.2.0 | Zlib |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 |
 | fs4 | 0.13.1 | MIT OR Apache-2.0 |
@@ -136,24 +141,24 @@ Full list (name, version, licence):
 | futures-task | 0.3.34 | MIT OR Apache-2.0 |
 | futures-util | 0.3.34 | MIT OR Apache-2.0 |
 | generic-array | 0.14.7 | MIT |
-| getrandom | 0.2.17 | MIT OR Apache-2.0 |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 |
 | glob | 0.3.4 | MIT OR Apache-2.0 |
-| hashbrown | 0.15.5 | MIT OR Apache-2.0 |
+| hashbrown | 0.16.1 | MIT OR Apache-2.0 |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 |
-| hashlink | 0.10.0 | MIT OR Apache-2.0 |
+| hashlink | 0.11.1 | MIT OR Apache-2.0 |
 | heck | 0.5.0 | MIT OR Apache-2.0 |
 | hex | 0.4.3 | MIT OR Apache-2.0 |
-| hkdf | 0.12.4 | MIT OR Apache-2.0 |
+| hkdf | 0.13.0 | MIT OR Apache-2.0 |
 | hmac | 0.12.1 | MIT OR Apache-2.0 |
-| home | 0.5.12 | MIT OR Apache-2.0 |
+| hmac | 0.13.0 | MIT OR Apache-2.0 |
 | htmlescape | 0.3.1 | Apache-2.0 / MIT / MPL-2.0 |
 | http | 1.5.0 | MIT OR Apache-2.0 |
 | http-body | 1.1.0 | MIT |
 | http-body-util | 0.1.5 | MIT |
 | httparse | 1.10.1 | MIT OR Apache-2.0 |
 | httpdate | 1.0.3 | MIT OR Apache-2.0 |
+| hybrid-array | 0.4.15 | MIT OR Apache-2.0 |
 | hyper | 1.12.0 | MIT |
 | hyper-util | 0.1.21 | MIT |
 | icu_collections | 2.3.0 | Unicode-3.0 |
@@ -185,7 +190,7 @@ Full list (name, version, licence):
 | lru | 0.18.5 | MIT |
 | matchers | 0.2.0 | MIT |
 | matchit | 0.8.4 | MIT AND BSD-3-Clause |
-| md-5 | 0.10.6 | MIT OR Apache-2.0 |
+| md-5 | 0.11.0 | MIT OR Apache-2.0 |
 | measure_time | 0.9.0 | MIT |
 | memchr | 2.8.3 | Unlicense OR MIT |
 | memmap2 | 0.9.11 | MIT OR Apache-2.0 |
@@ -222,10 +227,10 @@ Full list (name, version, licence):
 | qrcode | 0.14.1 | MIT OR Apache-2.0 |
 | quick-xml | 0.42.0 | MIT |
 | quote | 1.0.47 | MIT OR Apache-2.0 |
-| rand | 0.8.8 | MIT OR Apache-2.0 |
+| rand | 0.10.3 | MIT OR Apache-2.0 |
 | rand | 0.9.5 | MIT OR Apache-2.0 |
-| rand_chacha | 0.3.1 | MIT OR Apache-2.0 |
 | rand_chacha | 0.9.0 | MIT OR Apache-2.0 |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 |
 | rand_core | 0.6.4 | MIT OR Apache-2.0 |
 | rand_core | 0.9.5 | MIT OR Apache-2.0 |
 | rayon | 1.12.0 | MIT OR Apache-2.0 |
@@ -238,7 +243,6 @@ Full list (name, version, licence):
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT |
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 |
-| ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 |
 | same-file | 1.0.6 | Unlicense/MIT |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 |
 | serde | 1.0.229 | MIT OR Apache-2.0 |
@@ -247,9 +251,9 @@ Full list (name, version, licence):
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 |
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
 | serde_spanned | 1.1.2 | MIT OR Apache-2.0 |
-| serde_urlencoded | 0.7.1 | MIT/Apache-2.0 |
 | sha1 | 0.10.7 | MIT OR Apache-2.0 |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 |
+| sha2 | 0.11.1 | MIT OR Apache-2.0 |
 | sharded-slab | 0.1.7 | MIT |
 | shlex | 2.0.1 | MIT OR Apache-2.0 |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 |
@@ -259,12 +263,12 @@ Full list (name, version, licence):
 | smallvec | 1.16.2 | MIT OR Apache-2.0 |
 | socket2 | 0.6.5 | MIT OR Apache-2.0 |
 | spin | 0.9.9 | MIT |
-| sqlx | 0.8.6 | MIT OR Apache-2.0 |
-| sqlx-core | 0.8.6 | MIT OR Apache-2.0 |
-| sqlx-macros | 0.8.6 | MIT OR Apache-2.0 |
-| sqlx-macros-core | 0.8.6 | MIT OR Apache-2.0 |
-| sqlx-postgres | 0.8.6 | MIT OR Apache-2.0 |
-| sqlx-sqlite | 0.8.6 | MIT OR Apache-2.0 |
+| sqlx | 0.9.0 | MIT OR Apache-2.0 |
+| sqlx-core | 0.9.0 | MIT OR Apache-2.0 |
+| sqlx-macros | 0.9.0 | MIT OR Apache-2.0 |
+| sqlx-macros-core | 0.9.0 | MIT OR Apache-2.0 |
+| sqlx-postgres | 0.9.0 | MIT OR Apache-2.0 |
+| sqlx-sqlite | 0.9.0 | MIT OR Apache-2.0 |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 |
 | stringprep | 0.1.5 | MIT/Apache-2.0 |
 | strsim | 0.11.1 | MIT |
@@ -323,7 +327,7 @@ Full list (name, version, licence):
 | vcpkg | 0.2.15 | MIT/Apache-2.0 |
 | version_check | 0.9.5 | MIT/Apache-2.0 |
 | walkdir | 2.5.0 | Unlicense/MIT |
-| whoami | 1.6.1 | Apache-2.0 OR BSL-1.0 OR MIT |
+| whoami | 2.1.3 | Apache-2.0 OR BSL-1.0 OR MIT |
 | winnow | 1.0.4 | MIT |
 | writeable | 0.6.4 | Unicode-3.0 |
 | yoke | 0.8.3 | Unicode-3.0 |

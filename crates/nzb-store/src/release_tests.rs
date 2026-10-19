@@ -81,7 +81,7 @@ pub(crate) fn new<'a>(a: &'a Analysis) -> NewRelease<'a> {
 
 pub(crate) async fn count(db: &SqliteDb, table: &str) -> i64 {
     // Table names are literals in this test file only.
-    sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
         .fetch_one(db.readers())
         .await
         .unwrap()

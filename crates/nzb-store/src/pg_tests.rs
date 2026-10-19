@@ -1,4 +1,5 @@
 //! v3 schema, roles and connection-layer tests against the ephemeral test Postgres (T112).
+//! Dynamic SQL marked `AssertSqlSafe` uses fixture-generated names, numeric ids and literal test statements only.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -338,9 +339,9 @@ async fn sec_087_serve_never_runs_migrations() {
     // A second, empty database: bootstrap only, no migration. Connecting the app role must not create anything.
     let name = format!("{}_empty", t.name);
     let mut su = t.superuser_conn().await;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE DATABASE \"{name}\" TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'"
-    ))
+    )))
     .execute(&mut su)
     .await
     .unwrap();
@@ -373,10 +374,12 @@ async fn sec_087_serve_never_runs_migrations() {
     .unwrap();
     assert_eq!(tables, 0, "connecting must never migrate");
     db.close().await;
-    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
-        .execute(&mut su)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE \"{name}\" WITH (FORCE)"
+    )))
+    .execute(&mut su)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1240,7 +1243,10 @@ async fn staging_triggers_delete_the_staged_credentials() {
              VALUES ({id}, sha256('{sess}'::bytea), {inv}, 'h', 1, 100);"
         )
     };
-    sqlx::raw_sql(&stage("s1")).execute(&mut c).await.unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(stage("s1")))
+        .execute(&mut c)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM session WHERE id_hash = sha256('s1'::bytea)")
         .execute(&mut c)
         .await
@@ -1250,7 +1256,10 @@ async fn staging_triggers_delete_the_staged_credentials() {
         .await
         .unwrap();
     assert_eq!(n, 0, "staging dies with its session");
-    sqlx::raw_sql(&stage("s2")).execute(&mut c).await.unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(stage("s2")))
+        .execute(&mut c)
+        .await
+        .unwrap();
     sqlx::query("UPDATE account SET disabled_at = 5 WHERE id = $1")
         .bind(id)
         .execute(&mut c)
@@ -1323,7 +1332,7 @@ async fn sec_095_statement_timeout_is_set_on_every_pool() {
             ("jit", "off"),
             ("application_name", app),
         ] {
-            let v: String = sqlx::query_scalar(&format!("SHOW {setting}"))
+            let v: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SHOW {setting}")))
                 .fetch_one(&mut *c)
                 .await
                 .unwrap();
@@ -1631,11 +1640,11 @@ async fn sec_068_restore_mark_cannot_be_cleared_without_its_effects() {
     .fetch_one(&mut app)
     .await
     .unwrap();
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "INSERT INTO session (id_hash, account_id, stage, csrf_token, created_at, last_seen_at, expires_at) \
          VALUES (sha256('s'::bytea), {a}, 'active', sha256('c'::bytea), 1, 1, 9999999999); \
          INSERT INTO api_key (name, prefix, key_hash, created_at, owner_id) VALUES ('k', 'p', sha256('k'::bytea), 1, {a});"
-    ))
+    )))
     .execute(&mut app)
     .await
     .unwrap();
@@ -1714,11 +1723,11 @@ async fn sec_087_db_check_fails_on_role_membership_or_ownership() {
     let t = TestDb::new().await;
     let probe = format!("nzbd_probe_{}", t.name.trim_start_matches("nzbd_t_"));
     let mut su = t.superuser_conn().await;
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE ROLE {probe} LOGIN PASSWORD 'probe-pass'; GRANT nzbd_app TO {probe}; \
          GRANT CONNECT ON DATABASE \"{}\" TO {probe}; ALTER ROLE {probe} SET search_path = nzbd, pg_temp;",
         t.name
-    ))
+    )))
     .execute(&mut su)
     .await
     .unwrap();
@@ -1734,10 +1743,12 @@ async fn sec_087_db_check_fails_on_role_membership_or_ownership() {
         !excess.contains(&"owns objects in schema nzbd".to_owned()),
         "{excess:?}"
     );
-    sqlx::raw_sql(&format!("ALTER TABLE nzbd.search_replay OWNER TO {probe}"))
-        .execute(&mut su)
-        .await
-        .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE nzbd.search_replay OWNER TO {probe}"
+    )))
+    .execute(&mut su)
+    .await
+    .unwrap();
     let excess = db.privilege_self_test().await.unwrap();
     assert!(
         excess.contains(&"owns objects in schema nzbd".to_owned()),
@@ -1745,11 +1756,11 @@ async fn sec_087_db_check_fails_on_role_membership_or_ownership() {
     );
     assert!(!db.deep_db_check().await.unwrap().quick_check_ok);
     db.close().await;
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "ALTER TABLE nzbd.search_replay OWNER TO nzbd_owner; REVOKE CONNECT ON DATABASE \"{}\" FROM {probe}; \
          DROP ROLE {probe};",
         t.name
-    ))
+    )))
     .execute(&mut su)
     .await
     .unwrap();
@@ -1761,9 +1772,9 @@ async fn readiness_refuses_a_database_that_is_not_utf8() {
     let t = TestDb::new().await;
     let name = format!("{}_ascii", t.name);
     let mut su = t.superuser_conn().await;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE DATABASE \"{name}\" TEMPLATE template0 ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C'"
-    ))
+    )))
     .execute(&mut su)
     .await
     .unwrap();
@@ -1787,10 +1798,12 @@ async fn readiness_refuses_a_database_that_is_not_utf8() {
     assert_eq!(r, Readiness::EncodingNotUtf8);
     assert_eq!(r.code(), Some("DB_ENCODING_NOT_UTF8"));
     db.close().await;
-    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
-        .execute(&mut su)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE \"{name}\" WITH (FORCE)"
+    )))
+    .execute(&mut su)
+    .await
+    .unwrap();
 }
 
 /// T134 review I4: the roles migration (`v3/0010_roles`) refuses a library that already holds an account, or only an

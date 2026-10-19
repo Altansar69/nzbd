@@ -496,10 +496,11 @@ async fn sec_094_backup_omits_sessions_and_throttle_state() {
             "account_throttle",
             "user_known_ip",
         ] {
-            let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+            let n: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             assert_eq!(n, 0, "{table}");
         }
         // Only the closed invitation is carried; the open one (a usable code) is not.

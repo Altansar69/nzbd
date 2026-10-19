@@ -4,6 +4,8 @@
 
 ### Security
 
+- Upgrade SQLx to 0.9.0, removing the optional vulnerable RSA dependency from the lockfile without enabling MySQL.
+  The dependency audit no longer reports **RUSTSEC-2023-0071**.
 - Password hashing and verification keep their concurrency slots until the blocking work actually finishes, even
   when a login or invitation request is cancelled. Cancelled waiters also leave the queue correctly.
 - Downloads release their buffers and concurrency slots at the deadline even when a stalled client stops reading.
@@ -65,6 +67,12 @@
 - Expand regression coverage for cancellation, stalled downloads, backup concurrency, blob repair, malformed NZBs,
   index upgrades, SQLite outbox transactions and restore credential revocation. The legacy SQLite check fixture is
   generated from migrations, and source-bundle tests work when the separate fuzz project is absent.
+- Exercise both historical database migration paths on every test run: saved-search and page-size migrations
+  preserve populated 3.1 data, and the subsequent roles migration refuses it with `FRESH_DATA_REQUIRED` without
+  altering that data or the successful migration ledger, including on retry. This does not enable an unsupported
+  populated-library upgrade across the roles boundary.
+- Cover MFA enrollment confirmation over HTTP with missing, invalid, malformed and expired enrollment tokens,
+  checking that neither a new nor an existing pending secret is disclosed. A valid-token control verifies QR setup.
 - Refresh the Rust licence inventory from the Linux production dependency tree and Cargo metadata.
 
 ### Upgrading
@@ -75,9 +83,8 @@ The database and stored NZB files are retained, and no manual index deletion is 
 
 ### Dependency audit status
 
-`Cargo.lock` still contains `rsa` 0.9.10 through SQLx's optional MySQL dependency, so a raw `cargo audit` still reports
-**RUSTSEC-2023-0071**. Neither `rsa` nor `sqlx-mysql` is present in the application's enabled dependency tree, including
-`cargo tree --target all`. The advisory has not been suppressed or removed from the audit results.
+SQLx 0.9.0 makes MySQL RSA authentication opt-in. The application does not enable MySQL, and `Cargo.lock` no longer
+contains `rsa`. `cargo audit` passes without advisory suppressions.
 
 ## 0.5.1 (2026-10-18)
 

@@ -37,6 +37,6 @@ test-support = ["nzb-store/pg-test-support"]  # the seam's test fixtures (Fixtur
 # `Store` are tested against both backends (T122).
 nzb-store = { path = "../nzb-store", version = "0.5.1", features = ["pg-test-support"] }
 proptest = "1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

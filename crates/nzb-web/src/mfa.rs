@@ -306,6 +306,7 @@ mod session_tests {
         test: TestStore,
         auth: AuthState,
         session: SessionCtx,
+        cookie: String,
         clock: Arc<ManualWallClock>,
     }
 
@@ -337,7 +338,13 @@ mod session_tests {
             .await;
         }
         let mut headers = HeaderMap::new();
-        let cookie = set_cookie.to_str().unwrap().split(';').next().unwrap();
+        let cookie = set_cookie
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
         headers.insert(header::COOKIE, cookie.parse().unwrap());
         let session = auth.peek_session(&headers).await.unwrap().unwrap();
         SecretEnv {
@@ -345,6 +352,7 @@ mod session_tests {
             test,
             auth,
             session,
+            cookie,
             clock,
         }
     }
@@ -506,6 +514,139 @@ mod session_tests {
             .header(header::COOKIE, cookie)
             .header("x-csrf-token", csrf)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+    }
+
+    #[tokio::test]
+    async fn enrollment_confirmation_rejects_invalid_tokens_without_disclosing_secret() {
+        const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        const WRONG: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        const SECRET: &[u8] = b"12345678901234567890";
+
+        for seeded in [false, true] {
+            for (case, supplied, expired) in [
+                ("wrong", Some(WRONG), false),
+                ("missing", None, false),
+                ("malformed", Some("not-base32"), false),
+                ("expired", Some(TOKEN), true),
+            ] {
+                let e = secret_env(false).await;
+                let db = &e.test.store;
+                let uid = e.session.user_id;
+                assert!(
+                    db.set_enrollment_token_for(
+                        uid,
+                        &totp::enroll_token_hash(TOKEN),
+                        NOW + 20,
+                        NOW,
+                    )
+                    .await
+                    .unwrap()
+                );
+                if seeded {
+                    let blob = totp::seal(e.auth.totp_key().unwrap(), uid, SECRET).unwrap();
+                    db.store_pending_totp(uid, &blob, false).await.unwrap();
+                }
+                let before = db.get_mfa_state(uid).await.unwrap().unwrap();
+                assert_eq!(before.totp_secret_enc.is_some(), seeded);
+                if expired {
+                    e.clock.advance(20);
+                }
+                let app = crate::router_with_auth(
+                    &crate::WebConfig {
+                        insecure_cookies: true,
+                        ..crate::WebConfig::default()
+                    },
+                    &e.auth,
+                    axum::Router::new(),
+                );
+                // A syntactically valid code selects the confirmation branch. An invalid
+                // enrollment token must stop it before either creating or reading a secret.
+                let form = supplied.map_or_else(
+                    || "code=000000".to_owned(),
+                    |token| format!("token={token}&code=000000"),
+                );
+                let response = app
+                    .oneshot(
+                        post("/mfa/enroll", &e.cookie, &e.session.csrf_token)
+                            .body(Body::from(form))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{case}, seeded={seeded}");
+                let bytes = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+                let html = std::str::from_utf8(&bytes).unwrap();
+                assert!(html.contains(INVALID_TOKEN), "{case}, seeded={seeded}");
+                assert!(html.contains("name=\"token\""));
+                for forbidden in ["otpauth", "data:image", "class=\"secret\"", "name=\"code\""] {
+                    assert!(
+                        !html.contains(forbidden),
+                        "{case}, seeded={seeded}: {forbidden}"
+                    );
+                }
+                assert!(!html.contains(&totp::base32_encode(SECRET)));
+                let after = db.get_mfa_state(uid).await.unwrap().unwrap();
+                assert_eq!(after.totp_secret_enc, before.totp_secret_enc);
+                assert!(!after.totp_enabled);
+                assert_eq!(e.test.i64("SELECT count(*) FROM recovery_code").await, 0);
+                let session = db.get_session(&e.session.id_hash).await.unwrap().unwrap();
+                assert_eq!(session.stage, SessionStage::PendingMfa);
+                assert!(!session.enroll_proven);
+                assert!(session.expires_at > e.auth.now());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_valid_token_without_code_reveals_pending_secret() {
+        let e = secret_env(false).await;
+        let db = &e.test.store;
+        let uid = e.session.user_id;
+        let token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert!(
+            db.set_enrollment_token_for(uid, &totp::enroll_token_hash(token), NOW + 60, NOW)
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.get_mfa_state(uid)
+                .await
+                .unwrap()
+                .unwrap()
+                .totp_secret_enc
+                .is_none()
+        );
+        let app = crate::router_with_auth(
+            &crate::WebConfig {
+                insecure_cookies: true,
+                ..crate::WebConfig::default()
+            },
+            &e.auth,
+            axum::Router::new(),
+        );
+        let response = app
+            .oneshot(
+                post("/mfa/enroll", &e.cookie, &e.session.csrf_token)
+                    .body(Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        let html = std::str::from_utf8(&bytes).unwrap();
+        for expected in ["otpauth", "data:image", "class=\"secret\"", "name=\"code\""] {
+            assert!(html.contains(expected), "missing {expected}");
+        }
+        assert!(!html.contains(INVALID_TOKEN));
+        let state = db.get_mfa_state(uid).await.unwrap().unwrap();
+        let secret = secret_of_state(&e.auth, uid, &state).unwrap();
+        assert!(html.contains(&totp::base32_encode(&secret)));
+        assert!(!state.totp_enabled);
+        assert_eq!(e.test.i64("SELECT count(*) FROM recovery_code").await, 0);
+        let session = db.get_session(&e.session.id_hash).await.unwrap().unwrap();
+        assert_eq!(session.stage, SessionStage::PendingMfa);
+        assert!(!session.enroll_proven);
     }
 
     #[tokio::test]

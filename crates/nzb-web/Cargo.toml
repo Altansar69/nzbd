@@ -62,6 +62,6 @@ nzb-store = { version = "0.5.1", path = "../nzb-store", features = ["pg-test-sup
 futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
 tokio = { version = "1.53.2", features = ["rt", "macros", "time", "net", "io-util", "test-util"] }
 # Same sqlx as nzb-store (tests flip user columns directly).
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }

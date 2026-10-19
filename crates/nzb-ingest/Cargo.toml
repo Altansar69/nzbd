@@ -35,7 +35,7 @@ tracing = "0.1.44"
 
 [dev-dependencies]
 # Test-only: seeds quarantine rows directly (same sqlx as nzb-store, already in the lockfile).
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
 nzb-testkit = { path = "../nzb-testkit", version = "0.5.1" }
 # The backend matrix (NZBD_TEST_BACKEND) and the Postgres test harness (T122).
 nzb-store = { path = "../nzb-store", version = "0.5.1", features = ["pg-test-support"] }

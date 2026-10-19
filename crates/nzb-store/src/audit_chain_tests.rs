@@ -62,7 +62,11 @@ async fn tamper(e: &Env, sql: &str) {
         .execute(w)
         .await
         .unwrap();
-    sqlx::raw_sql(sql).execute(w).await.unwrap();
+    // Deliberate fixture-authored tampering, including generated row ids; no application input.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
+        .execute(w)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -324,7 +328,7 @@ async fn sec_080_audit_content_is_immutable_at_the_sql_level() {
         "actor_role = 'admin'",
         "target_id = 3",
     ] {
-        let r = sqlx::query(&format!("UPDATE audit_log SET {col}"))
+        let r = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE audit_log SET {col}")))
             .execute(e.db.writer())
             .await;
         assert!(r.is_err(), "{col} must be refused");
