@@ -571,16 +571,15 @@ struct Job {
     dos: (u16, u16),
 }
 
-/// Whether a missing blob belongs to a release that is gone (deleted, hidden or replaced since the
-/// lookup): such an entry is skipped. `false` when it still exists unchanged (a store problem).
-async fn vanished(job: &Job, e: &Entry) -> bool {
+/// Whether the release was deleted, hidden or replaced since the initial lookup. Recheck after
+/// reading its blob, before constructing an entry; an unavailable database must abort the archive.
+async fn vanished(job: &Job, e: &Entry) -> Result<bool, Stop> {
     match job.db.get_release(e.id).await {
-        Ok(Some(r)) => r.sha256 != e.sha || job.sess.hides_category(r.category_id),
-        Ok(None) => true,
-        // Cannot tell: treat it as a store problem (abort).
+        Ok(Some(r)) => Ok(r.sha256 != e.sha || job.sess.hides_category(r.category_id)),
+        Ok(None) => Ok(true),
         Err(err) => {
             tracing::error!(error = %err, "release lookup failed during bulk download");
-            false
+            Err(Stop::Failed)
         }
     }
 }
@@ -605,16 +604,17 @@ async fn produce(job: Job, pacer: &mut Pacer, capacity: Arc<Capacity>) -> Result
             tracing::error!(release_id = e.id, "bulk blob read task failed");
             Stop::Failed
         })?;
+        if matches!(&result, Ok(_) | Err(StoreError::NotFound)) && vanished(&job, e).await? {
+            // A retained blob can outlive its row or become hidden while another entry streams.
+            // Skip before adding bytes to the cap or recording any ZIP header/directory entry.
+            tracing::info!(
+                release_id = e.id,
+                "release gone during bulk download, entry skipped"
+            );
+            continue;
+        }
         let bytes = match result {
             Ok(b) => b,
-            Err(StoreError::NotFound) if vanished(&job, e).await => {
-                // Deleted meanwhile (review 46 I2): left out like the list would, header not written.
-                tracing::info!(
-                    release_id = e.id,
-                    "release gone during bulk download, entry skipped"
-                );
-                continue;
-            }
             Err(err) => {
                 let class = match err {
                     StoreError::NotFound => "missing",
@@ -846,6 +846,7 @@ mod tests {
         started: Arc<tokio::sync::Notify>,
         release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
         finished: Arc<std::sync::atomic::AtomicBool>,
+        bytes: Vec<u8>,
     }
 
     #[async_trait::async_trait]
@@ -862,13 +863,14 @@ mod tests {
             let release = self.release.lock().unwrap().take();
             let started = Arc::clone(&self.started);
             let finished = Arc::clone(&self.finished);
+            let bytes = self.bytes.clone();
             tokio::task::spawn_blocking(move || {
                 if let Some(release) = release {
                     started.notify_one();
                     let _ = release.recv_timeout(Duration::from_secs(10));
                 }
                 finished.store(true, Ordering::SeqCst);
-                Ok(b"verified NZB bytes".to_vec())
+                Ok(bytes)
             })
             .await
             .unwrap()
@@ -909,6 +911,35 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let db = nzb_store::test_backend::TestStore::open(dir.path()).await;
+        let bytes = nzb_testkit::NzbBuilder::new()
+            .meta("title", "Blocking read fixture")
+            .file(nzb_testkit::FileSpec::new("payload.rar").segments(1))
+            .build();
+        let analysis = nzb_core::analyze_with_clock(
+            &bytes,
+            &nzb_core::Limits::default(),
+            &nzb_core::SystemClock::new(),
+        )
+        .unwrap();
+        let id = db
+            .store
+            .insert_release_as(
+                &nzb_store::NewRelease {
+                    analysis: &analysis,
+                    nzb_size_bytes: u64::try_from(bytes.len()).unwrap(),
+                    source_name: None,
+                    source_label: None,
+                    category_id: 8010,
+                    category_source: nzb_store::CategorySource::Upload,
+                    meta_json: None,
+                    scene: nzb_store::SceneColumns::default(),
+                    ingested_at: 1_700_000_000,
+                },
+                None,
+                &nzb_store::Uploader::Unattributed,
+            )
+            .await
+            .unwrap();
         let clock = Arc::new(crate::auth::ManualWallClock::new(0));
         let limits = BulkLimits::default();
         let state = Arc::new(BulkState::new(limits, clock));
@@ -920,14 +951,15 @@ mod tests {
             started: Arc::clone(&started),
             release: Mutex::new(Some(blocked)),
             finished: Arc::clone(&finished),
+            bytes: bytes.clone(),
         });
         let job = || Job {
             store: Arc::clone(&store),
             db: db.store.clone(),
             sess: test_session(),
             entries: vec![Entry {
-                id: 1,
-                sha: Sha256([1; 32]),
+                id,
+                sha: analysis.sha256,
                 name: "release.nzb".to_owned(),
             }],
             dos: dos_time_date(0),
@@ -1187,5 +1219,453 @@ mod tests {
         drop(rx);
         let mut p = Pacer::new(tx, taken, &limits);
         assert!(matches!(p.send(Msg::Done).await, Err(Stop::Gone)));
+    }
+}
+
+#[cfg(test)]
+mod bulk_visibility_regressions {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{HeaderMap, Request, StatusCode, header};
+    use http_body_util::BodyExt as _;
+    use nzb_core::{Limits, Sha256, SystemClock, Taxonomy, analyze_with_clock};
+    use nzb_store::prelude::*;
+    use nzb_store::test_backend::TestStore;
+    use nzb_store::{
+        CategorySource, FsStore, NewAccount, NewRelease, NzbStore, PrefsPatch, Role, SceneColumns,
+        SessionStage, Store, StoreError, Uploader,
+    };
+    use nzb_testkit::{FileSpec, NzbBuilder};
+    use tokio::sync::{Notify, oneshot};
+    use tower::ServiceExt as _;
+
+    use crate::auth::{AuthConfig, AuthState, ClientMeta, ManualWallClock, SessionCtx};
+
+    const NOW: i64 = 1_700_000_000;
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// Only the first real, verified read waits. Dropping the test's sender also releases it.
+    struct HeldFirstRead {
+        inner: FsStore,
+        first: Sha256,
+        started: Arc<Notify>,
+        resume: Mutex<Option<oneshot::Receiver<()>>>,
+        reads: Mutex<Vec<Sha256>>,
+    }
+
+    #[async_trait::async_trait]
+    impl NzbStore for HeldFirstRead {
+        async fn put(
+            &self,
+            sha: Sha256,
+            bytes: &[u8],
+        ) -> Result<nzb_store::PutOutcome, StoreError> {
+            self.inner.put(sha, bytes).await
+        }
+
+        async fn get(&self, sha: &Sha256) -> Result<Vec<u8>, StoreError> {
+            let bytes = self.inner.get(sha).await?;
+            self.reads.lock().unwrap().push(*sha);
+            let resume = if *sha == self.first {
+                self.resume.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some(resume) = resume {
+                self.started.notify_one();
+                let _ = resume.await;
+            }
+            Ok(bytes)
+        }
+
+        async fn exists(&self, sha: &Sha256) -> Result<bool, StoreError> {
+            self.inner.exists(sha).await
+        }
+
+        async fn delete(&self, sha: &Sha256) -> Result<(), StoreError> {
+            self.inner.delete(sha).await
+        }
+    }
+
+    struct Login {
+        cookie: String,
+        csrf: String,
+    }
+
+    impl Login {
+        async fn create(auth: &AuthState, username: &str, role: Role) -> Self {
+            let id = auth
+                .db()
+                .create_account_operator(
+                    &NewAccount {
+                        username,
+                        password_hash: "unused-test-hash",
+                        role: Some(role),
+                    },
+                    auth.config().account_policy(),
+                    NOW,
+                )
+                .await
+                .unwrap();
+            let (cookie, csrf) = auth
+                .start_session_full(id, SessionStage::Active, &ClientMeta::default(), None)
+                .await
+                .unwrap();
+            Self {
+                cookie: cookie
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned(),
+                csrf,
+            }
+        }
+
+        async fn session(&self, auth: &AuthState) -> SessionCtx {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, self.cookie.parse().unwrap());
+            auth.peek_session(&headers).await.unwrap().unwrap()
+        }
+
+        fn request(&self, path: &str, form: Option<String>) -> Request<Body> {
+            let request = if form.is_some() {
+                Request::post(path)
+            } else {
+                Request::get(path)
+            };
+            request
+                .header(header::HOST, "localhost")
+                .header(header::ORIGIN, "http://localhost")
+                .header(header::COOKIE, &self.cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .extension(ConnectInfo(
+                    "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                ))
+                .body(form.map_or_else(Body::empty, Body::from))
+                .unwrap()
+        }
+    }
+
+    struct Sample {
+        id: i64,
+        sha: Sha256,
+        name: String,
+        bytes: Vec<u8>,
+    }
+
+    async fn sample(db: &Store, fs: &FsStore, title: &str, category: u32) -> Sample {
+        let bytes = NzbBuilder::new()
+            .meta("title", title)
+            .file(FileSpec::new("payload.rar").segments(1))
+            .build();
+        let analysis = analyze_with_clock(&bytes, &Limits::default(), &SystemClock::new()).unwrap();
+        assert_eq!(analysis.title, title);
+        fs.put(analysis.sha256, &bytes).await.unwrap();
+        let id = db
+            .insert_release_as(
+                &NewRelease {
+                    analysis: &analysis,
+                    nzb_size_bytes: u64::try_from(bytes.len()).unwrap(),
+                    source_name: None,
+                    source_label: None,
+                    category_id: category,
+                    category_source: CategorySource::Upload,
+                    meta_json: None,
+                    scene: SceneColumns::default(),
+                    ingested_at: NOW,
+                },
+                None,
+                &Uploader::Unattributed,
+            )
+            .await
+            .unwrap();
+        Sample {
+            id,
+            sha: analysis.sha256,
+            name: format!("{title}.nzb"),
+            bytes,
+        }
+    }
+
+    struct Fixture {
+        app: Router,
+        auth: AuthState,
+        admin: Login,
+        viewer: Login,
+        store: Arc<HeldFirstRead>,
+        samples: [Sample; 3],
+        _database: TestStore,
+        _directory: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        async fn new() -> (Self, oneshot::Sender<()>) {
+            let dir = tempfile::tempdir().unwrap();
+            let database = TestStore::open(dir.path()).await;
+            let db = database.store.clone();
+            let clock = Arc::new(ManualWallClock::new(NOW));
+            let taxonomy = Arc::new(Taxonomy::builtin().unwrap());
+            let auth = AuthState::new(
+                db.clone(),
+                AuthConfig {
+                    multi_user: true,
+                    insecure_cookies: true,
+                    xxx_categories: Arc::from(taxonomy.subtree_ids(nzb_core::XXX_CATEGORY)),
+                    ..AuthConfig::default()
+                },
+                clock.clone(),
+            )
+            .await
+            .unwrap();
+            let admin = Login::create(&auth, "zip-admin", Role::Admin).await;
+            let viewer = Login::create(&auth, "zip-viewer", Role::Viewer).await;
+            db.patch_user_prefs_as(
+                &viewer.session(&auth).await.actor(),
+                PrefsPatch {
+                    hide_xxx: Some(true),
+                    ..PrefsPatch::default()
+                },
+                None,
+                NOW,
+            )
+            .await
+            .unwrap();
+            assert!(!admin.session(&auth).await.hides_category(6000));
+            assert!(viewer.session(&auth).await.hides_category(6000));
+
+            let fs = FsStore::open(dir.path().join("store")).unwrap();
+            let samples = [
+                sample(&db, &fs, "Alpha", 8010).await,
+                sample(&db, &fs, "Beta", 8010).await,
+                sample(&db, &fs, "InitiallyHidden", 6000).await,
+            ];
+            assert!(samples[0].id < samples[1].id && samples[1].id < samples[2].id);
+            let (resume, paused) = oneshot::channel();
+            let store = Arc::new(HeldFirstRead {
+                inner: fs,
+                first: samples[0].sha,
+                started: Arc::new(Notify::new()),
+                resume: Mutex::new(Some(paused)),
+                reads: Mutex::new(Vec::new()),
+            });
+            let app = crate::router_with_auth(
+                &crate::WebConfig {
+                    insecure_cookies: true,
+                    ..crate::WebConfig::default()
+                },
+                &auth,
+                crate::release::routes(crate::release::ReleaseDeps {
+                    db,
+                    taxonomy,
+                    store: store.clone(),
+                    limits: Limits::default(),
+                    clock,
+                    max_parse: Duration::from_secs(5),
+                }),
+            );
+            (
+                Self {
+                    app,
+                    auth,
+                    admin,
+                    viewer,
+                    store,
+                    samples,
+                    _database: database,
+                    _directory: dir,
+                },
+                resume,
+            )
+        }
+    }
+
+    fn word(bytes: &[u8], at: usize) -> usize {
+        usize::from(u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()))
+    }
+
+    fn dword(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    /// Parse the STORE ZIP format independently, checking both inventories and actual payload CRCs.
+    fn zip_entries(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let end = bytes.len().checked_sub(22).unwrap();
+        assert_eq!(&bytes[end..end + 4], b"PK\x05\x06");
+        assert_eq!(word(bytes, end + 4), 0);
+        assert_eq!(word(bytes, end + 6), 0);
+        let count = word(bytes, end + 10);
+        assert_eq!(word(bytes, end + 8), count);
+        assert_eq!(word(bytes, end + 20), 0);
+        let directory = usize::try_from(dword(bytes, end + 16)).unwrap();
+        assert_eq!(
+            directory + usize::try_from(dword(bytes, end + 12)).unwrap(),
+            end
+        );
+
+        let mut entries = Vec::new();
+        let mut local = 0;
+        let mut central = directory;
+        for _ in 0..count {
+            assert_eq!(&bytes[local..local + 4], b"PK\x03\x04");
+            assert_eq!(word(bytes, local + 6), 0);
+            assert_eq!(word(bytes, local + 8), 0, "STORE method");
+            let crc = dword(bytes, local + 14);
+            let size = usize::try_from(dword(bytes, local + 18)).unwrap();
+            assert_eq!(usize::try_from(dword(bytes, local + 22)).unwrap(), size);
+            let name_end = local + 30 + word(bytes, local + 26);
+            let name = String::from_utf8(bytes[local + 30..name_end].to_vec()).unwrap();
+            let data_start = name_end + word(bytes, local + 28);
+            let data_end = data_start + size;
+            assert!(data_end <= directory);
+            let data = bytes[data_start..data_end].to_vec();
+            assert_eq!(crc32fast::hash(&data), crc);
+
+            assert_eq!(&bytes[central..central + 4], b"PK\x01\x02");
+            assert_eq!(word(bytes, central + 8), 0);
+            assert_eq!(word(bytes, central + 10), 0);
+            assert_eq!(dword(bytes, central + 16), crc);
+            assert_eq!(usize::try_from(dword(bytes, central + 20)).unwrap(), size);
+            assert_eq!(usize::try_from(dword(bytes, central + 24)).unwrap(), size);
+            assert_eq!(usize::try_from(dword(bytes, central + 42)).unwrap(), local);
+            let central_name_end = central + 46 + word(bytes, central + 28);
+            assert_eq!(&bytes[central + 46..central_name_end], name.as_bytes());
+            central = central_name_end + word(bytes, central + 30) + word(bytes, central + 32);
+            local = data_end;
+            entries.push((name, data));
+        }
+        assert_eq!(local, directory, "every local entry has a central entry");
+        assert_eq!(
+            central, end,
+            "no omitted central entries or trailing payload"
+        );
+        entries
+    }
+
+    async fn download_one(f: &Fixture, sample: &Sample) -> (StatusCode, axum::body::Bytes) {
+        let response = tokio::time::timeout(
+            WAIT,
+            f.app.clone().oneshot(
+                f.viewer
+                    .request(&format!("/release/{}/download", sample.id), None),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let status = response.status();
+        let bytes = tokio::time::timeout(WAIT, response.into_body().collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        (status, bytes)
+    }
+
+    async fn check_export(reclassify: bool) {
+        let (f, resume) = Fixture::new().await;
+        let [first, second, hidden] = &f.samples;
+        let form = format!(
+            "csrf_token={}&id={}&id={}&id={}",
+            f.viewer.csrf, first.id, second.id, hidden.id
+        );
+        let response = tokio::time::timeout(
+            WAIT,
+            f.app
+                .clone()
+                .oneshot(f.viewer.request("/releases/bulk/download", Some(form))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+        tokio::time::timeout(WAIT, f.store.started.notified())
+            .await
+            .unwrap();
+        assert_eq!(*f.store.reads.lock().unwrap(), vec![first.sha]);
+
+        if reclassify {
+            let request = f.admin.request(
+                &format!("/release/{}/category", second.id),
+                Some(format!("csrf_token={}&category=6000", f.admin.csrf)),
+            );
+            let changed = tokio::time::timeout(WAIT, f.app.clone().oneshot(request))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(changed.status(), StatusCode::SEE_OTHER);
+        }
+        let row = tokio::time::timeout(WAIT, f.auth.db().get_release(second.id))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.category_id, if reclassify { 6000 } else { 8010 });
+        assert_eq!(
+            row.sha256, second.sha,
+            "classification never rewrites the blob"
+        );
+        assert_eq!(
+            f.viewer
+                .session(&f.auth)
+                .await
+                .hides_category(row.category_id),
+            reclassify
+        );
+
+        // This uses the same live viewer session and the normal download gate, not a fake verdict.
+        let (second_status, second_bytes) = download_one(&f, second).await;
+
+        // Resume and consume the complete stream before the final red/green assertions. On an
+        // earlier failure, dropping this sender unblocks the read too; no worker can stay parked.
+        let _ = resume.send(());
+        let zip = tokio::time::timeout(WAIT, response.into_body().collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        let entries = zip_entries(&zip);
+        let mut expected = vec![(first.name.clone(), first.bytes.clone())];
+        if reclassify {
+            assert_eq!(second_status, StatusCode::NOT_FOUND);
+        } else {
+            assert_eq!(second_status, StatusCode::OK);
+            assert_eq!(second_bytes.as_ref(), second.bytes.as_slice());
+            expected.push((second.name.clone(), second.bytes.clone()));
+        }
+        assert!(!f.store.reads.lock().unwrap().contains(&hidden.sha));
+        if reclassify {
+            assert_eq!(
+                entries, expected,
+                "release reclassified into caller-hidden category must be omitted before its ZIP header"
+            );
+        } else {
+            assert_eq!(
+                entries, expected,
+                "unchanged visible selection must survive the barrier"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reclassified_release_is_omitted_before_its_zip_entry() {
+        tokio::time::timeout(Duration::from_secs(60), check_export(true))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unchanged_visible_releases_remain_in_zip() {
+        tokio::time::timeout(Duration::from_secs(60), check_export(false))
+            .await
+            .unwrap();
     }
 }
