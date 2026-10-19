@@ -1903,15 +1903,23 @@ impl Engine {
         })
     }
 
-    /// Facts for the metrics listener (T105): database aggregates, `/proc/self` and two `stat` calls. Unlike
+    /// Facts for the metrics listener (T105): database aggregates, `/proc/self` and, for SQLite, two `stat` calls. Unlike
     /// [`Engine::inputs`] it never writes a probe file.
     pub async fn metrics_facts(&self, now: i64) -> crate::metrics::MetricsFacts {
         let db = match &self.db {
             Some(db) => Some(gather_db(db, now).await),
             None => None,
         };
-        let size = |p: PathBuf| fs::metadata(p).ok().map(|m| m.len());
-        let wal = path_with_suffix(&self.cfg.paths.db, "-wal");
+        let (db_bytes, wal_bytes) = match self.cfg.db.backend {
+            nzb_store::DbBackend::Sqlite => {
+                let size = |p: &Path| fs::metadata(p).ok().map(|m| m.len());
+                (
+                    size(&self.cfg.paths.db),
+                    size(&path_with_suffix(&self.cfg.paths.db, "-wal")),
+                )
+            }
+            nzb_store::DbBackend::Postgres => (None, None),
+        };
         crate::metrics::MetricsFacts {
             uptime: self.live.as_ref().map(|_| self.started.elapsed().as_secs()),
             db,
@@ -1919,8 +1927,8 @@ impl Engine {
                 .await
                 .unwrap_or_default(),
             live: self.live_facts(),
-            db_bytes: size(self.cfg.paths.db.clone()),
-            wal_bytes: size(wal),
+            db_bytes,
+            wal_bytes,
         }
     }
 
@@ -2635,5 +2643,81 @@ mod resource_followup_tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(deep_summary_check(summary, NOW + 603).status, Status::Ok);
+    }
+}
+
+#[cfg(test)]
+mod metrics_backend_regressions {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[tokio::test]
+    async fn file_size_metrics_belong_to_the_selected_database_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("metrics.sqlite");
+        let wal_path = path_with_suffix(&db_path, "-wal");
+        let ts = nzb_store::test_backend::TestStore::open_file(&db_path).await;
+        let mut cfg = Config::default();
+        cfg.db.backend = ts.backend();
+        cfg.paths.db = db_path.clone();
+        let foreign_db = b"foreign database file";
+        let foreign_wal = b"foreign journal";
+        if ts.backend() == nzb_store::DbBackend::Postgres {
+            // These belong to no library: PostgreSQL uses its real isolated test database.
+            assert!(!db_path.exists() && !wal_path.exists());
+            fs::write(&db_path, foreign_db).unwrap();
+            fs::write(&wal_path, foreign_wal).unwrap();
+        }
+        let engine = Engine::offline(&cfg, Some(ts.store.clone()), false);
+        let facts =
+            tokio::time::timeout(Duration::from_secs(60), engine.metrics_facts(1_800_000_000))
+                .await
+                .expect("real metrics collection must finish");
+        let rendered = crate::metrics::render(&facts);
+        let db = facts
+            .db
+            .as_ref()
+            .expect("real database facts must be collected");
+        assert!(
+            db.writer_ok && db.reader_ok,
+            "real database connections must answer"
+        );
+        assert!(
+            db.totals.is_some(),
+            "real database aggregates must be collected"
+        );
+        match ts.backend() {
+            nzb_store::DbBackend::Postgres => {
+                assert_eq!(fs::read(&db_path).unwrap(), foreign_db);
+                assert_eq!(fs::read(&wal_path).unwrap(), foreign_wal);
+                assert_eq!(
+                    (facts.db_bytes, facts.wal_bytes),
+                    (None, None),
+                    "PostgreSQL metrics must not report unrelated SQLite path sizes"
+                );
+                assert!(!rendered.contains("nzbd_db_file_bytes"));
+                assert!(!rendered.contains("nzbd_db_wal_bytes"));
+            }
+            nzb_store::DbBackend::Sqlite => {
+                let db_bytes = fs::metadata(&db_path).unwrap().len();
+                let wal_bytes = fs::metadata(&wal_path).unwrap().len();
+                assert!(db_bytes > 0 && wal_bytes > 0);
+                assert_eq!(
+                    (facts.db_bytes, facts.wal_bytes),
+                    (Some(db_bytes), Some(wal_bytes))
+                );
+                assert!(
+                    rendered
+                        .lines()
+                        .any(|line| line == format!("nzbd_db_file_bytes {db_bytes}"))
+                );
+                assert!(
+                    rendered
+                        .lines()
+                        .any(|line| line == format!("nzbd_db_wal_bytes {wal_bytes}"))
+                );
+            }
+        }
     }
 }
