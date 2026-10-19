@@ -752,6 +752,7 @@ impl PgDb {
     /// swap commits through [`PgDb::commit_staged_recovery`].
     ///
     /// # Errors
+    /// [`StoreError::NotFound`] when the pending session of `ctx` is gone (revoked, expired);
     /// [`StoreError::OutOfRange`] for a bad key; database failure.
     #[allow(clippy::too_many_lines)] // one transaction: the order of its steps is the contract
     pub async fn confirm_totp_enrollment_v2(
@@ -780,7 +781,11 @@ impl PgDb {
             .bind(now)
             .fetch_optional(&mut *tx)
             .await?;
-            let Some(proven) = live else { return Ok(false) };
+            // A revoked or expired pending session is not a wrong code: the caller must not
+            // answer it with the secret page again.
+            let Some(proven) = live else {
+                return Err(StoreError::NotFound);
+            };
             proven
         } else {
             false

@@ -50,7 +50,7 @@ struct VerifyPage {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::too_many_lines)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
 mod session_tests {
     use super::*;
     use crate::auth::{AuthConfig, ManualWallClock};
@@ -156,15 +156,25 @@ mod session_tests {
                 step: Some(99),
                 recovery_hashes: &[[92; 32]],
             };
-            let accepted = db
+            let verdict = db
                 .confirm_totp_enrollment_v2(
                     &confirm,
                     &context,
                     None,
                     if case == "expired" { NOW + 10 } else { NOW },
                 )
-                .await
-                .unwrap();
+                .await;
+            // No live pending session of this account behind the cookie (revoked, expired, already
+            // active, another account's) is a distinct verdict: the page must not show the secret
+            // again as if the code were wrong.
+            let accepted = match (case, verdict) {
+                (
+                    "revoked" | "expired" | "active" | "foreign",
+                    Err(nzb_store::StoreError::NotFound),
+                ) => false,
+                (_, Ok(v)) => v,
+                (_, other) => panic!("case {case}, token mode {token_mode}: {other:?}"),
+            };
             assert_eq!(
                 accepted,
                 case == "live",
@@ -1397,6 +1407,8 @@ pub(crate) async fn post_enroll(
         .await
     {
         Ok(v) => v,
+        // The pending session died meanwhile (revoked, expired): never the secret page again.
+        // The enrollment gate sends a dead session to the login page.
         Err(StoreError::NotFound) => return see_other("/mfa/enroll", None),
         Err(e) => {
             tracing::error!(error = %e, "enrollment verdict failed");

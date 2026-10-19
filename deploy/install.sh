@@ -1358,7 +1358,10 @@ if [ "$MODE" = external ]; then
   say
   say "  3. Your proxy must: serve https://$SITE/, forward the Host header unchanged, set X-Forwarded-For (client address)"
   say "     and X-Forwarded-Proto https, accept 321 MiB bodies on /upload and 65 MiB on /api/v1/nzb, and (advised) answer 404"
-  say "     for /healthz from outside."
+  say "     for /healthz from outside. Idle upstream (keep-alive) connections must be dropped by the proxy"
+  say "     within 8 s: nzbd closes them after 10 s, and a request sent on a closing connection fails with a 502"
+  say "     (Caddy: transport http { keepalive_idle_timeout 8s }; Traefik: forwardingTimeouts.idleConnTimeout 8s;"
+  say "     nginx: no upstream keepalive by default)."
   say
   case "$EXT_KIND" in
     nginx)
@@ -1398,6 +1401,9 @@ NGINX
          reverse_proxy nzbd:8080 {
            header_up X-Forwarded-For {remote_host}
            header_up X-Forwarded-Proto {scheme}
+           transport http {
+             keepalive_idle_timeout 8s
+           }
          }
        }
 CADDY

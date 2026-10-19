@@ -100,7 +100,9 @@ pub struct WebConfig {
     /// Connections reserved for loopback peers (container healthcheck).
     pub loopback_reserved_connections: usize,
     /// Absolute time to receive one complete request head, including the wait between
-    /// keep-alive requests (slowloris defence; enforced by [`listener::serve`]).
+    /// keep-alive requests (slowloris defence; enforced by [`listener::serve`]). A reverse proxy
+    /// must drop its idle upstream connections sooner than this (the bundled Caddy uses 8 s),
+    /// or a request sent on a connection nzbd is closing fails with a 502.
     pub header_read_timeout: Duration,
     /// Per-IP budgets per minute.
     pub rate_limits: RateLimits,
