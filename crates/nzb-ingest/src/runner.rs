@@ -298,14 +298,18 @@ pub async fn run_scan_loop_gated<C: Clock + 'static>(
             );
         }
         // Wait for a wake-up or the interval, in slices so shutdown stays responsive.
-        let deadline = started + interval;
+        // An interval beyond Instant's range has no periodic deadline; watcher events
+        // and shutdown still work through the same bounded waits.
+        let deadline = started.checked_add(interval);
         let min_next = started + MIN_SCAN_GAP;
         loop {
             let now = tokio::time::Instant::now();
-            if now >= deadline {
+            if deadline.is_some_and(|deadline| now >= deadline) {
                 break;
             }
-            let slice = (deadline - now).min(Duration::from_millis(500));
+            let slice = deadline.map_or(Duration::from_millis(500), |deadline| {
+                (deadline - now).min(Duration::from_millis(500))
+            });
             // `wait` also works on a disabled handle (plain timeout; `poke` still wakes it).
             let w = Arc::clone(&wake);
             let signalled = tokio::select! {
