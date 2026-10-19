@@ -1169,6 +1169,10 @@ impl Notice {
 /// expanded terms are never shown (review 30 I2).
 pub const NOTICE_NARROWED: &str = "Search narrowed: a word matched too many index terms, so only part \
 of them was searched. Type more of the word for complete results.";
+/// With exclusions, a shared dictionary's actual cap event must not become a hidden-content signal.
+/// This describes the request's bounded matching policy without claiming a truncation occurred.
+pub const NOTICE_BOUNDED: &str = "Prefix and approximate matches use a limited set of alternatives. \
+Use more specific search terms if a result is missing.";
 /// The fuzzy fallback produced the page (no exact hit, D35 Q5). The approximate terms are never shown.
 pub const NOTICE_APPROXIMATE: &str = "No exact matches. Showing approximate matches.";
 /// Degraded browse (ARCHITECTURE 3.3).
@@ -1419,7 +1423,9 @@ async fn search_listing<S: SearchIndexV3>(
     if page.fuzzy_fallback && !page.items.is_empty() {
         notices.push(Notice::info(NOTICE_APPROXIMATE));
     }
-    if page.narrowed {
+    if !req.query.exclude_categories.is_empty() && page.expansion_bounded {
+        notices.push(Notice::info(NOTICE_BOUNDED));
+    } else if req.query.exclude_categories.is_empty() && page.narrowed {
         notices.push(Notice::info(NOTICE_NARROWED));
     }
     if approx {
@@ -1898,6 +1904,8 @@ mod hb6_regressions {
     struct LargeListing {
         total: Total,
         seen: Arc<std::sync::Mutex<Vec<SearchQuery>>>,
+        narrowed: bool,
+        expansion_bounded: bool,
     }
 
     impl LargeListing {
@@ -1939,7 +1947,8 @@ mod hb6_regressions {
                 has_more: u64::from(req.query.offset).saturating_add(count) < self.total.value(),
                 limit: req.query.limit,
                 facets: Vec::new(),
-                narrowed: false,
+                narrowed: self.narrowed,
+                expansion_bounded: self.expansion_bounded,
                 fuzzy_fallback: false,
                 dropped: 0,
             }
@@ -2067,6 +2076,52 @@ mod hb6_regressions {
     }
 
     #[tokio::test]
+    async fn hidden_search_notices_do_not_disclose_dictionary_cap_events() {
+        for narrowed in [false, true] {
+            let mut search = LargeListing {
+                total: Total::Exact(0),
+                seen: Arc::default(),
+                narrowed,
+                expansion_bounded: true,
+            };
+            let mut req = SearchRequest {
+                query: SearchQuery {
+                    q: Some("par".into()),
+                    exclude_categories: vec![6000],
+                    ..SearchQuery::default()
+                },
+                match_mode: MatchMode::Prefix,
+                ..SearchRequest::default()
+            };
+            let listing = search_listing(&search, &req, None).await.ok().unwrap();
+            assert_eq!(listing.items.len(), 0);
+            assert_eq!(
+                listing
+                    .notices
+                    .iter()
+                    .map(|n| n.text.as_str())
+                    .collect::<Vec<_>>(),
+                [NOTICE_BOUNDED]
+            );
+            // Ordinary unfiltered searches retain the actual truncation notice.
+            req.query.exclude_categories.clear();
+            let listing = search_listing(&search, &req, None).await.ok().unwrap();
+            assert_eq!(listing.notices.len(), usize::from(narrowed));
+            assert!(listing.notices.iter().all(|n| n.text == NOTICE_NARROWED));
+            // The engine's corpus-independent flag is false for exact/no-text/off queries.
+            req.query.exclude_categories = vec![6000];
+            search.expansion_bounded = false;
+            search.narrowed = false;
+            for (q, mode) in [(None, MatchMode::Prefix), (Some("par"), MatchMode::Exact)] {
+                req.query.q = q.map(str::to_owned);
+                req.match_mode = mode;
+                let listing = search_listing(&search, &req, None).await.ok().unwrap();
+                assert!(listing.notices.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn last_page_outside_the_accepted_range_is_not_linked() {
         let dir = tempfile::tempdir().unwrap();
         let db = nzb_store::test_backend::TestStore::open(dir.path()).await;
@@ -2076,6 +2131,8 @@ mod hb6_regressions {
                 let search = LargeListing {
                     total: Total::Exact(total),
                     seen: Arc::default(),
+                    narrowed: false,
+                    expansion_bounded: false,
                 };
                 let app = listing_app(db.store.clone(), search, *per_page);
                 let body = html(&app, "/?q=alpha&sort=size_asc&min_mib=1").await;
@@ -2116,6 +2173,8 @@ mod hb6_regressions {
             let search = LargeListing {
                 total: Total::Exact(u64::from(MAX_PAGE) * u64::from(*per_page)),
                 seen: Arc::default(),
+                narrowed: false,
+                expansion_bounded: false,
             };
             let seen = Arc::clone(&search.seen);
             let app = listing_app(db.store.clone(), search, *per_page);
@@ -2157,6 +2216,8 @@ mod hb6_regressions {
                 LargeListing {
                     total,
                     seen: Arc::default(),
+                    narrowed: false,
+                    expansion_bounded: false,
                 },
                 25,
             );

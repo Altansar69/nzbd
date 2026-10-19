@@ -267,6 +267,157 @@ pub(crate) async fn login_verdict_rereads_credentials<S: Repo>(s: &S) {
     assert!(ok);
 }
 
+/// A password change must close the gap after its predecessor's accepted verdict. Use the
+/// same second for every operation so this cannot pass through a timestamp-only comparison.
+pub(crate) async fn login_session_issuance_rereads_credentials<S: Repo>(s: &S) {
+    use crate::SessionStage::{Active, PendingMfa};
+    use crate::acct_testkit::sess;
+
+    let uid = account(s, "root", Role::Admin).await;
+    let seen = s.get_login_user_by_id(uid).await.unwrap().unwrap();
+    let ctx = crate::AttemptContext {
+        ip_key: "192.0.2.7",
+        session: None,
+        bucket_refused: false,
+    };
+    let owner = sess(uid, 201, Active, T0);
+    let pending = sess(uid, 202, PendingMfa, T0);
+    s.insert_session(&owner, 5).await.unwrap();
+    s.insert_login_session(&seen, &pending, None, 5)
+        .await
+        .unwrap();
+    assert!(
+        s.login_password_step_v2(Some(&seen), true, "bad_password", &ctx, None, T0)
+            .await
+            .unwrap()
+    );
+
+    let replacement = sess(uid, 203, Active, T0);
+    s.change_password(
+        uid,
+        &owner.id_hash,
+        "replacement-hash",
+        &replacement,
+        None,
+        T0,
+    )
+    .await
+    .unwrap();
+    assert!(s.get_session(&owner.id_hash).await.unwrap().is_none());
+    assert!(s.get_session(&pending.id_hash).await.unwrap().is_none());
+    let late = sess(uid, 204, PendingMfa, T0);
+    for replacing in [None, Some(&replacement.id_hash)] {
+        assert!(matches!(
+            s.insert_login_session(&seen, &late, replacing, 5).await,
+            Err(StoreError::NotFound)
+        ));
+        assert!(s.get_session(&late.id_hash).await.unwrap().is_none());
+        // A refused stale login must not remove the cookie it was asked to replace.
+        assert!(s.get_session(&replacement.id_hash).await.unwrap().is_some());
+    }
+    assert!(matches!(
+        s.rotate_session_strict(&pending.id_hash, &sess(uid, 205, Active, T0), 5)
+            .await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(
+        !s.login_password_step_v2(Some(&seen), true, "bad_password", &ctx, None, T0)
+            .await
+            .unwrap()
+    );
+    let fresh = s.get_login_user_by_id(uid).await.unwrap().unwrap();
+    assert!(
+        s.login_password_step_v2(Some(&fresh), true, "bad_password", &ctx, None, T0)
+            .await
+            .unwrap()
+    );
+    s.insert_login_session(&fresh, &late, None, 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.get_session(&late.id_hash).await.unwrap().unwrap().stage,
+        PendingMfa
+    );
+}
+
+pub(crate) async fn login_session_issuance_preserves_rotation_and_caps<S: Repo>(s: &S) {
+    use crate::SessionStage::{Active, PendingMfa};
+    use crate::acct_testkit::sess;
+
+    let uid = account(s, "root", Role::Admin).await;
+    let seen = s.get_login_user_by_id(uid).await.unwrap().unwrap();
+    let active = sess(uid, 210, Active, T0);
+    s.insert_session(&active, 1).await.unwrap();
+    let first = sess(uid, 211, PendingMfa, T0);
+    s.insert_login_session(&seen, &first, None, 1)
+        .await
+        .unwrap();
+    let second = sess(uid, 212, PendingMfa, T0 + 1);
+    s.insert_login_session(&seen, &second, Some(&first.id_hash), 1)
+        .await
+        .unwrap();
+    assert!(s.get_session(&first.id_hash).await.unwrap().is_none());
+    assert!(s.get_session(&second.id_hash).await.unwrap().is_some());
+    let third = sess(uid, 213, PendingMfa, T0 + 2);
+    // A missing presented cookie remains harmless, as it was for normal login rotation.
+    s.insert_login_session(&seen, &third, Some(&[214; 32]), 1)
+        .await
+        .unwrap();
+    assert!(s.get_session(&second.id_hash).await.unwrap().is_none());
+    let row = s.get_session(&third.id_hash).await.unwrap().unwrap();
+    assert_eq!(row.stage, PendingMfa);
+    assert!(!row.enroll_proven);
+    assert!(s.get_session(&active.id_hash).await.unwrap().is_some());
+}
+
+pub(crate) async fn login_session_issuance_rejects_invalid_state<S: Repo>(s: &S) {
+    use crate::SessionStage::{Active, PendingMfa};
+    use crate::acct_testkit::sess;
+
+    account(s, "root", Role::Admin).await;
+    let uid = account(s, "member", Role::Uploader).await;
+    let seen = s.get_login_user_by_id(uid).await.unwrap().unwrap();
+    for invalid in [
+        sess(uid, 220, Active, T0),
+        sess(uid + 1, 220, PendingMfa, T0),
+    ] {
+        assert!(matches!(
+            s.insert_login_session(&seen, &invalid, None, 5).await,
+            Err(StoreError::OutOfRange("login session"))
+        ));
+    }
+    let pending = sess(uid, 220, PendingMfa, T0);
+    let mut wrong_role = seen.clone();
+    wrong_role.role = Role::Viewer;
+    let mut wrong_enrollment = seen.clone();
+    wrong_enrollment.totp_enabled = !seen.totp_enabled;
+    let mut disabled_observation = seen.clone();
+    disabled_observation.disabled = true;
+    for stale in [wrong_role, wrong_enrollment, disabled_observation] {
+        assert!(matches!(
+            s.insert_login_session(&stale, &pending, None, 5).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+    s.disable_account_operator(uid, T0).await.unwrap();
+    assert!(matches!(
+        s.insert_login_session(&seen, &pending, None, 5).await,
+        Err(StoreError::NotFound)
+    ));
+    s.enable_account_operator(uid, T0).await.unwrap();
+    s.insert_login_session(&seen, &pending, None, 5)
+        .await
+        .unwrap();
+    // Account deletion requires an explicit disable first, even for the operator.
+    s.disable_account_operator(uid, T0).await.unwrap();
+    s.delete_account_operator(uid, T0).await.unwrap();
+    assert!(matches!(
+        s.insert_login_session(&seen, &pending, None, 5).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(s.get_session(&pending.id_hash).await.unwrap().is_none());
+}
+
 pub(crate) async fn audit_append_and_walk_agree<S: Repo>(s: &S) {
     s.audit_event(T0, Some("cli"), "probe", Some("n=1"), None)
         .await
@@ -1203,6 +1354,9 @@ both!(
     trash_is_bound_to_the_confirmed_digest,
     viewer_cannot_edit,
     login_verdict_rereads_credentials,
+    login_session_issuance_rereads_credentials,
+    login_session_issuance_preserves_rotation_and_caps,
+    login_session_issuance_rejects_invalid_state,
     audit_append_and_walk_agree,
     users_page_reads_work,
     audit_page_filters_and_attributes_uploads,

@@ -174,7 +174,7 @@ pub struct PipelineConfig {
 
 /// A retry-class failure of the same watch path is logged once per this many attempts.
 const RETRY_LOG_EVERY: u32 = 10;
-/// A watch file whose processing panics this many times is quarantined (bounded retry).
+/// Panics before quarantining a watch file whose validated read identity is still available.
 const MAX_PANICS: u32 = 3;
 /// Bound on the in-memory per-path attempt table.
 const MAX_TRACKED_PATHS: usize = 4096;
@@ -518,12 +518,12 @@ struct Ctx {
     /// Test-only: an injected crash happened; skip failure handling (a dead process does none).
     crashed: bool,
     /// A blocking step (read, parse) or the job's own commit panicked: counted like a panicking
-    /// job, so the file is quarantined after [`MAX_PANICS`] instead of being retried forever.
+    /// job, so a validated watch source is quarantined after [`MAX_PANICS`].
     panicked: bool,
 }
 
 /// The result of a blocking task of a job; a panic in it marks the job as panicked (see
-/// [`Ctx::panicked`]), so hostile input that panics is quarantined instead of retried forever.
+/// [`Ctx::panicked`]), so hostile input whose identity was validated can be quarantined.
 fn joined<T>(r: Result<T, tokio::task::JoinError>, ctx: &mut Ctx) -> Result<T, IngestError> {
     r.map_err(|e| {
         ctx.panicked |= e.is_panic();
@@ -741,8 +741,8 @@ impl Pipeline {
                     drop(permit);
                     let _ = reply.send(r);
                 }
-                // A panic inside a job must not kill the worker; it is handled like any other
-                // failure (INTERNAL, bounded retry, then quarantine).
+                // A panic inside a job must not kill the worker. The read identity did not
+                // survive this task, so a watch source must remain in place for scanner backoff.
                 Err(_) => {
                     drop(permit);
                     let _ = reply.send(Err(self.fail_panicked(&meta, None, None).await));
@@ -1127,7 +1127,7 @@ impl Pipeline {
     }
 
     /// A job panicked: log it as `INTERNAL` and count it; the third panic of the same watch
-    /// path quarantines the file so it cannot loop forever.
+    /// path quarantines the file only when its validated read identity is still available.
     async fn fail_panicked(
         &self,
         meta: &JobMeta,
@@ -1137,7 +1137,8 @@ impl Pipeline {
         let panics = meta.path.as_ref().map_or(MAX_PANICS, |p| {
             self.attempts_mut(|m| {
                 // A flood of panicking paths cannot be tracked individually (the table would be
-                // reset); a path that would overflow it is quarantined on its first panic.
+                // reset); a path that would overflow it is eligible for immediate quarantine
+                // when its read identity is available.
                 if m.len() >= MAX_TRACKED_PATHS && !m.contains_key(p) {
                     return MAX_PANICS;
                 }
@@ -1554,10 +1555,11 @@ impl Pipeline {
         }
     }
 
-    /// Failure bookkeeping: counters, `ingest_log(failed)`, and the source per [`Disposition`]
-    /// (rejects are moved to `failed/` and get a `reason.json`, see [`crate::failure`]). Retry-class failures of the same watch path are logged
-    /// once per [`RETRY_LOG_EVERY`] attempts (a stuck file must not flood the log table);
-    /// `panics` is the number of panics seen for the path (quarantine at [`MAX_PANICS`]).
+    /// Failure bookkeeping: counters, `ingest_log(failed)`, and the source per [`Disposition`].
+    /// Watch rejects with a validated identity are moved to `failed/` and get a `reason.json`
+    /// (see [`crate::failure`]). Retry-class failures and unvalidated watch sources are logged once
+    /// per [`RETRY_LOG_EVERY`] attempts, so a stuck file cannot flood the log table.
+    /// `panics` counts panics for this path (eligible for quarantine at [`MAX_PANICS`]).
     async fn fail(
         &self,
         meta: &JobMeta,
@@ -1570,11 +1572,15 @@ impl Pipeline {
             return;
         }
         let inner = &self.inner;
+        // A failed read may never have validated the scanner's source identity (for example,
+        // growth past the size cap). Do not acquire authority over whatever now occupies that
+        // watch path. Staged uploads are service-owned and still need failure cleanup.
         let quarantine = meta.staged
             || (meta.path.is_some()
+                && ident.is_some()
                 && (err.disposition() == Disposition::Reject || panics >= MAX_PANICS));
         if !quarantine
-            && panics == 0
+            && (panics == 0 || ident.is_none())
             && let Some(p) = &meta.path
         {
             let n = self.attempts_mut(|m| {
@@ -1904,6 +1910,14 @@ mod retry_capacity_tests {
         let overflow = watch.join("overflow.nzb");
         std::fs::write(&tracked, b"original tracked file").unwrap();
         std::fs::write(&overflow, b"original overflow file").unwrap();
+        let tracked_ident = fsops::read_source(&tracked, 1024, None, Some(&watch))
+            .unwrap()
+            .ident;
+        let overflow_ident = fsops::read_source(&overflow, 1024, None, Some(&watch))
+            .unwrap()
+            .ident;
+        assert!(tracked_ident.is_some());
+        assert!(overflow_ident.is_some());
         // Seed only the prior observations, then exercise real failure logging and moving.
         // Thousands of actual panics/SQL writes would add runtime without testing another path.
         pipeline.attempts_mut(|attempts| {
@@ -1926,7 +1940,9 @@ mod retry_capacity_tests {
             staged: false,
             import: false,
         };
-        let error = pipeline.fail_panicked(&meta(&overflow), None, None).await;
+        let error = pipeline
+            .fail_panicked(&meta(&overflow), None, overflow_ident)
+            .await;
         assert_eq!(error.code(), "INTERNAL");
         assert!(
             !overflow.exists(),
@@ -1954,14 +1970,18 @@ mod retry_capacity_tests {
                 },
             );
         });
-        pipeline.fail_panicked(&meta(&tracked), None, None).await;
+        pipeline
+            .fail_panicked(&meta(&tracked), None, tracked_ident.clone())
+            .await;
         assert!(tracked.exists());
         pipeline.attempts_mut(|attempts| {
             assert_eq!(attempts.len(), MAX_TRACKED_PATHS);
             assert_eq!(attempts.get(&tracked).unwrap().panics, 2);
             assert!(!attempts.contains_key(&retry));
         });
-        pipeline.fail_panicked(&meta(&tracked), None, None).await;
+        pipeline
+            .fail_panicked(&meta(&tracked), None, tracked_ident)
+            .await;
         assert!(
             !tracked.exists(),
             "the third tracked panic still quarantines"

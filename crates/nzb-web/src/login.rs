@@ -26,7 +26,7 @@ use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use nzb_store::prelude::*;
-use nzb_store::{SessionStage, username_is_valid};
+use nzb_store::{LoginUser, SessionStage, StoreError, username_is_valid};
 use tokio::sync::Semaphore;
 
 use crate::assets::Layout;
@@ -209,11 +209,8 @@ pub(crate) async fn hash_blocking(auth: &AuthState, pw: String) -> Result<String
 }
 
 enum Outcome {
-    /// Password accepted; carries the user's id and whether TOTP is enrolled.
-    PasswordOk {
-        user_id: i64,
-        enrolled: bool,
-    },
+    /// Password accepted; preserve the observed credentials until pending-session insertion.
+    PasswordOk(LoginUser),
     Failed,
 }
 
@@ -264,10 +261,7 @@ async fn check_credentials(
         )
         .await?;
     match (accepted, user) {
-        (true, Some(u)) => Ok(Outcome::PasswordOk {
-            user_id: u.id,
-            enrolled: u.totp_enabled,
-        }),
+        (true, Some(u)) => Ok(Outcome::PasswordOk(u)),
         _ => Ok(Outcome::Failed),
     }
 }
@@ -312,19 +306,28 @@ async fn post_login(
             return internal();
         }
     };
-    let Outcome::PasswordOk { user_id, enrolled } = outcome else {
+    let Outcome::PasswordOk(seen) = outcome else {
         return render_login(&auth, Some(INVALID_CREDENTIALS), username, None);
     };
+    finish_login(&auth, &seen, username, &headers, ip).await
+}
+
+/// Keep the verified credential observation until issuance commits, including when another
+/// request changes the password after `check_credentials` returned successfully.
+async fn finish_login(
+    auth: &AuthState,
+    seen: &LoginUser,
+    username: &str,
+    headers: &HeaderMap,
+    ip: std::net::IpAddr,
+) -> Response {
     // Fixation: the presented cookie (if any) is revoked and never reused; the new id is fresh.
-    let old = auth.presented_id(&headers).map(|id| sha256(id.as_bytes()));
-    let meta = ClientMeta::from_request(&headers, Some(ip));
-    match auth
-        .start_session(user_id, SessionStage::PendingMfa, &meta, old.as_ref())
-        .await
-    {
+    let old = auth.presented_id(headers).map(|id| sha256(id.as_bytes()));
+    let meta = ClientMeta::from_request(headers, Some(ip));
+    match auth.start_login_session(seen, &meta, old.as_ref()).await {
         Ok(cookie) => {
             let mut resp = see_other(
-                if enrolled {
+                if seen.totp_enabled {
                     "/login/mfa"
                 } else {
                     "/mfa/enroll"
@@ -335,6 +338,9 @@ async fn post_login(
             resp.headers_mut()
                 .append(header::SET_COOKIE, auth.clear_login_nonce_cookie());
             resp
+        }
+        Err(AuthError::Store(StoreError::NotFound)) => {
+            render_login(auth, Some(INVALID_CREDENTIALS), username, None)
         }
         Err(e) => {
             tracing::error!(error = %e, "session creation failed");
@@ -417,6 +423,110 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::too_many_lines)] // one deterministic before/change/after lifecycle
+    async fn password_change_after_verdict_refuses_cookie_issuance() {
+        use crate::auth::{AuthConfig, COOKIE_NAME, ManualWallClock};
+        use axum::body::to_bytes;
+        use nzb_store::test_backend::TestStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let test = TestStore::open(dir.path()).await;
+        let now = 1_700_000_000;
+        let old_password = "old password for the lifecycle fixture";
+        let new_password = "new password for the lifecycle fixture";
+        let old_hash = password::hash_password(old_password).unwrap();
+        let new_hash = password::hash_password(new_password).unwrap();
+        let uid = test
+            .store
+            .create_user("owner", &old_hash, now)
+            .await
+            .unwrap();
+        let auth = AuthState::new(
+            test.store.clone(),
+            AuthConfig::default(),
+            Arc::new(ManualWallClock::new(now)),
+        )
+        .await
+        .unwrap();
+        let ip = "192.0.2.7".parse().unwrap();
+        let headers = HeaderMap::new();
+        let meta = ClientMeta::from_request(&headers, Some(ip));
+        let owner = auth
+            .prepare_session(uid, SessionStage::Active, &meta)
+            .unwrap()
+            .0;
+        auth.db().insert_session(&owner, 5).await.unwrap();
+        let Outcome::PasswordOk(seen) = check_credentials(&auth, "owner", old_password, ip)
+            .await
+            .unwrap()
+        else {
+            panic!("the original password must pass before the change");
+        };
+        let replacement = auth
+            .prepare_session(uid, SessionStage::Active, &meta)
+            .unwrap()
+            .0;
+        auth.db()
+            .change_password(uid, &owner.id_hash, &new_hash, &replacement, None, now)
+            .await
+            .unwrap();
+        let response = finish_login(&auth, &seen, "owner", &headers, ip).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::LOCATION));
+        assert!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .all(|cookie| { !cookie.to_str().unwrap().starts_with(COOKIE_NAME) })
+        );
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(
+            String::from_utf8(body.to_vec())
+                .unwrap()
+                .contains(INVALID_CREDENTIALS)
+        );
+        assert!(
+            auth.db()
+                .get_session(&replacement.id_hash)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // The same handler still sets a pending cookie when the verified hash is current.
+        let Outcome::PasswordOk(fresh) = check_credentials(&auth, "owner", new_password, ip)
+            .await
+            .unwrap()
+        else {
+            panic!("the replacement password must pass");
+        };
+        let response = finish_login(&auth, &fresh, "owner", &headers, ip).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/mfa/enroll"
+        );
+        let cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find(|value| value.to_str().unwrap().starts_with(COOKIE_NAME))
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let mut request = HeaderMap::new();
+        request.insert(header::COOKIE, cookie.parse().unwrap());
+        assert_eq!(
+            auth.peek_session(&request).await.unwrap().unwrap().stage,
+            SessionStage::PendingMfa
+        );
+    }
 
     fn hash_work() -> bool {
         password::hash_password("queue cancellation regression").is_ok()

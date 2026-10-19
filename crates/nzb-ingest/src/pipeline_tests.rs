@@ -556,6 +556,49 @@ async fn invalid_nzb_is_rejected_quarantined_and_logged() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn watch_growth_past_limit_after_scan_preserves_unvalidated_source() {
+    let mut e = env(OPTS).await;
+    let src = e.put_watch("growing.nzb", b"small dummy input");
+    let mut candidates = e.candidates();
+    let grown = vec![b'x'; 64 * 1024 + 1];
+    fs::write(&src, &grown).unwrap();
+    let err = e
+        .pipeline
+        .process(Job::watch(candidates.remove(0)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "FILE_TOO_LARGE");
+    assert_eq!(fs::read(&src).unwrap(), grown);
+    assert!(names(&e.failed).is_empty(), "no quarantine or reason file");
+    assert!(e.blobs().is_empty());
+    assert_eq!(e.release_count().await, 0);
+    let log = e.db.list_ingest_log(10).await.unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].error_code.as_deref(), Some("FILE_TOO_LARGE"));
+
+    // A normally read malformed watch input still has an identity and must be quarantined.
+    let bad = b"<nzb><file subject='x'>";
+    let malformed = e.put_watch("malformed.nzb", bad);
+    let mut candidates = e.candidates();
+    assert_eq!(
+        candidates.len(),
+        1,
+        "the oversized source is not re-admitted"
+    );
+    let err = e
+        .pipeline
+        .process(Job::watch(candidates.remove(0)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.disposition(), Disposition::Reject);
+    assert!(!malformed.exists());
+    let quarantined = nzb_names(&e.failed);
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(fs::read(e.failed.join(&quarantined[0])).unwrap(), bad);
+    assert_eq!(fs::read(&src).unwrap(), grown);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sec005_hostile_names_never_reach_the_filesystem() {
     let e = env(OPTS).await;
     let bytes = nzb("../../../etc/evil.mkv");
@@ -969,10 +1012,8 @@ async fn t031_l4_panicking_job_is_logged_internal_and_quarantined_after_bounded_
     let mut e = env(OPTS).await;
     let bytes = nzb(SHOW);
     let src = e.put_watch("a.nzb", &bytes);
-    e.pipeline.set_hook(Some(Arc::new(|p| {
-        assert!(p != CrashPoint::BeforePut, "injected");
-        false
-    })));
+    // A commit panic retains the identity established by the successful source read.
+    e.pipeline.panic_on_commit(sha_of(&bytes));
     let (handle, _w) = e.pipeline.spawn_workers(1);
     for attempt in 1..=3 {
         e.scanner = scanner(&e.watch, &e.scan_clock, false);
@@ -990,7 +1031,6 @@ async fn t031_l4_panicking_job_is_logged_internal_and_quarantined_after_bounded_
             .all(|l| l.error_code.as_deref() == Some("INTERNAL"))
     );
     // The worker survived: a healthy job still runs.
-    e.pipeline.set_hook(None);
     e.put_watch("b.nzb", &nzb("other.mkv"));
     e.scanner = scanner(&e.watch, &e.scan_clock, false);
     let mut c = e.candidates();
@@ -998,6 +1038,48 @@ async fn t031_l4_panicking_job_is_logged_internal_and_quarantined_after_bounded_
         handle.submit(Job::watch(c.remove(0))).await.unwrap().kind,
         OutcomeKind::Ingested
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preparation_panic_without_recovered_identity_preserves_watch_source() {
+    let mut e = env(OPTS).await;
+    let bytes = nzb(SHOW);
+    let src = e.put_watch("a.nzb", &bytes);
+    e.pipeline.set_hook(Some(Arc::new(|p| {
+        assert!(p != CrashPoint::BeforePut, "injected");
+        false
+    })));
+    let (handle, _w) = e.pipeline.spawn_workers(1);
+    for _ in 0..3 {
+        e.scanner = scanner(&e.watch, &e.scan_clock, false);
+        let mut candidates = e.candidates();
+        let err = handle
+            .submit(Job::watch(candidates.remove(0)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "INTERNAL");
+        assert_eq!(fs::read(&src).unwrap(), bytes);
+        assert!(names(&e.failed).is_empty());
+    }
+    // These are retry-only failures: repeated panics without identity cannot flood ingest_log.
+    let log = e.db.list_ingest_log(10).await.unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].error_code.as_deref(), Some("INTERNAL"));
+    assert_eq!(e.pipeline.stats().failed, 1);
+
+    // Once the fault is removed, the worker can process the original file normally.
+    e.pipeline.set_hook(None);
+    e.scanner = scanner(&e.watch, &e.scan_clock, false);
+    let mut candidates = e.candidates();
+    assert_eq!(
+        handle
+            .submit(Job::watch(candidates.remove(0)))
+            .await
+            .unwrap()
+            .kind,
+        OutcomeKind::Ingested
+    );
+    assert!(!src.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

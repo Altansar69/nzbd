@@ -798,3 +798,121 @@ fn reconciliation_hooks_enqueue_instead_of_writing() {
         assert_eq!(index.count(&q).await.unwrap(), 0);
     });
 }
+
+#[test]
+fn hidden_only_vocabulary_does_not_narrow_or_displace_visible_search() {
+    rt().block_on(async {
+        for expansion_category in [None, Some(6000), Some(8010)] {
+            let mut docs = vec![doc(1, "public neutral")];
+            if let Some(cat) = expansion_category {
+                docs.extend((0..64).map(|n| {
+                    let mut d = doc(n + 2, &format!("par{n:03}"));
+                    d.category_id = cat;
+                    d.category_parent = cat / 1000 * 1000;
+                    d
+                }));
+            }
+            let (index, _, _) = mem_index(SearchConfig::default(), sys(), &[docs.clone()]);
+            let req = |q: &str, mode| SearchRequest {
+                query: SearchQuery {
+                    q: Some(q.into()),
+                    exclude_categories: vec![6000],
+                    limit: 100,
+                    ..SearchQuery::default()
+                },
+                match_mode: mode,
+                want_facets: true,
+                ..SearchRequest::default()
+            };
+            let par = index
+                .search_page(&req("par", MatchMode::Prefix))
+                .await
+                .unwrap();
+            assert!(par.expansion_bounded);
+            assert_eq!(par.narrowed, expansion_category == Some(8010));
+            if expansion_category == Some(8010) {
+                assert_eq!(par.total, Total::Exact(63));
+                assert_eq!(par.items.len(), 63);
+            } else {
+                assert_eq!(par.total, Total::Exact(0));
+                assert!(par.items.is_empty());
+                assert!(par.facets.is_empty());
+                assert!(par.fuzzy_fallback);
+            }
+            let public = index
+                .search_page(&req("public", MatchMode::Prefix))
+                .await
+                .unwrap();
+            assert_eq!(public.items.iter().map(|r| r.id).collect::<Vec<_>>(), [1]);
+            assert!(!public.narrowed);
+            for (q, mode) in [
+                ("public", MatchMode::Exact),
+                ("", MatchMode::Prefix),
+                ("pa", MatchMode::Prefix),
+            ] {
+                let p = index.search_page(&req(q, mode)).await.unwrap();
+                assert!(!p.expansion_bounded, "no expansion for {q:?}/{mode:?}");
+            }
+            if expansion_category == Some(6000) {
+                // With a full default-sized hidden vocabulary, the visible alternative sorted
+                // after those terms must still be found by the ordinary prefix request.
+                docs.push(doc(100, "parzzvisible"));
+                let (mixed, _, _) = mem_index(SearchConfig::default(), sys(), &[docs]);
+                let p = mixed
+                    .search_page(&req("par", MatchMode::Prefix))
+                    .await
+                    .unwrap();
+                assert_eq!(p.items.iter().map(|r| r.id).collect::<Vec<_>>(), [100]);
+                assert!(!p.narrowed);
+            }
+        }
+    });
+}
+
+#[test]
+fn expansion_policy_flag_and_visibility_work_survive_fallback_limits() {
+    let mut hidden = doc(1, "parhidden");
+    hidden.category_id = 6000;
+    hidden.category_parent = 6000;
+    let cfg = SearchConfig {
+        expansion_postings_budget: 1,
+        expansion_dict_entries: 1,
+        ..SearchConfig::default()
+    };
+    let (index, _, engine) = mem_index(cfg.clone(), sys(), &[vec![hidden]]);
+    let req = SearchRequest {
+        query: SearchQuery {
+            q: Some("par".into()),
+            exclude_categories: vec![6000],
+            ..SearchQuery::default()
+        },
+        match_mode: MatchMode::Prefix,
+        ..SearchRequest::default()
+    };
+    let result = crate::engine_search(
+        &engine,
+        &req,
+        None,
+        &cfg,
+        &crate::clock::Deadline::after(sys(), 60_000),
+        None,
+    )
+    .unwrap();
+    // The first pass spends the single posting visit. The fallback must not replenish it.
+    assert!(result.fuzzy_fallback);
+    assert_eq!(result.stats.visibility_postings, 0);
+    assert_eq!(result.total, 0);
+    assert!(result.narrowed);
+    rt().block_on(async {
+        let p = index.search_page(&req).await.unwrap();
+        assert!(p.expansion_bounded);
+        assert!(p.items.is_empty());
+        let off = SearchConfig {
+            prefix: false,
+            fuzzy: FuzzyMode::Off,
+            ..cfg
+        };
+        let (index, _, _) = mem_index(off, sys(), &[vec![doc(2, "parvisible")]]);
+        assert!(!index.search_page(&req).await.unwrap().expansion_bounded);
+    });
+}

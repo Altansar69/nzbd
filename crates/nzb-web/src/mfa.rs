@@ -53,13 +53,14 @@ struct VerifyPage {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
 mod session_tests {
     use super::*;
-    use crate::auth::{AuthConfig, ManualWallClock};
+    use crate::auth::{AuthConfig, ManualWallClock, WallClock};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, header};
     use futures_util::{StreamExt as _, stream};
     use nzb_store::test_backend::TestStore;
     use nzb_store::{AccountPolicy, NewAccount, NewSession, Role, Store};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::sync::oneshot;
     use tower::ServiceExt as _;
@@ -167,19 +168,15 @@ mod session_tests {
             // No live pending session of this account behind the cookie (revoked, expired, already
             // active, another account's) is a distinct verdict: the page must not show the secret
             // again as if the code were wrong.
-            let accepted = match (case, verdict) {
+            match (case, verdict) {
                 (
                     "revoked" | "expired" | "active" | "foreign",
                     Err(nzb_store::StoreError::NotFound),
-                ) => false,
-                (_, Ok(v)) => v,
+                )
+                | ("disabled", Ok(false))
+                | ("live", Ok(true)) => {}
                 (_, other) => panic!("case {case}, token mode {token_mode}: {other:?}"),
-            };
-            assert_eq!(
-                accepted,
-                case == "live",
-                "case {case}, token mode {token_mode}"
-            );
+            }
             assert_eq!(
                 db.get_mfa_state(uid).await.unwrap().unwrap().totp_enabled,
                 case == "live"
@@ -657,6 +654,183 @@ mod session_tests {
         let session = db.get_session(&e.session.id_hash).await.unwrap().unwrap();
         assert_eq!(session.stage, SessionStage::PendingMfa);
         assert!(!session.enroll_proven);
+    }
+
+    /// Pauses HTTP clock reads while the controller inspects committed database state. The
+    /// request runs on a blocking worker so this synchronous trait never blocks the test's
+    /// database driver. No clock-call count or timing delay chooses the confirmation boundary.
+    struct ConfirmationClock {
+        time: ManualWallClock,
+        armed: AtomicBool,
+        checkpoints: tokio::sync::mpsc::UnboundedSender<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl WallClock for ConfirmationClock {
+        fn now_secs(&self) -> i64 {
+            if self.armed.load(Ordering::SeqCst) {
+                let (resume, paused) = std::sync::mpsc::channel();
+                self.checkpoints.send(resume).unwrap();
+                paused.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+            self.time.now_secs()
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_confirmation_rechecks_session_after_reading_secret() {
+        const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+        for proven in [false, true] {
+            for case in ["revoked", "expired", "live"] {
+                let dir = tempfile::tempdir().unwrap();
+                let test = TestStore::open(dir.path()).await;
+                let db = &test.store;
+                let uid = owner(db, "owner").await;
+                let (checkpoints, mut checks) = tokio::sync::mpsc::unbounded_channel();
+                let clock = Arc::new(ConfirmationClock {
+                    time: ManualWallClock::new(NOW),
+                    armed: AtomicBool::new(false),
+                    checkpoints,
+                });
+                let auth = AuthState::new(
+                    db.clone(),
+                    AuthConfig {
+                        insecure_cookies: true,
+                        pending_secs: 120,
+                        totp_key: Some(Arc::new(totp::TotpKey::from_slice(&[37; 32]).unwrap())),
+                        ..AuthConfig::default()
+                    },
+                    clock.clone(),
+                )
+                .await
+                .unwrap();
+                let (set_cookie, csrf) = auth
+                    .start_session_full(uid, SessionStage::PendingMfa, &ClientMeta::default(), None)
+                    .await
+                    .unwrap();
+                let cookie = set_cookie.to_str().unwrap().split(';').next().unwrap();
+                let mut headers = HeaderMap::new();
+                headers.insert(header::COOKIE, cookie.parse().unwrap());
+                let session = auth.peek_session(&headers).await.unwrap().unwrap();
+                if proven {
+                    test.exec(&format!(
+                        "UPDATE session SET enroll_proven = true WHERE account_id = {uid}"
+                    ))
+                    .await;
+                } else {
+                    assert!(
+                        db.set_enrollment_token_for(
+                            uid,
+                            &totp::enroll_token_hash(TOKEN),
+                            NOW + 600,
+                            NOW,
+                        )
+                        .await
+                        .unwrap()
+                    );
+                }
+                assert!(
+                    db.get_mfa_state(uid)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .totp_secret_enc
+                        .is_none()
+                );
+                let app = crate::router_with_auth(
+                    &crate::WebConfig {
+                        insecure_cookies: true,
+                        ..crate::WebConfig::default()
+                    },
+                    &auth,
+                    axum::Router::new(),
+                );
+                // An invalid code guarantees the live control renders the secret page. Dead
+                // sessions must instead take the distinct NotFound branch after reading it.
+                let request = post("/mfa/enroll", cookie, &csrf)
+                    .body(Body::from(format!("token={TOKEN}&code=not-a-code")))
+                    .unwrap();
+                let router = app.clone();
+                let runtime = tokio::runtime::Handle::current();
+                clock.armed.store(true, Ordering::SeqCst);
+                let mut task = tokio::task::spawn_blocking(move || {
+                    runtime.block_on(router.oneshot(request)).unwrap()
+                });
+                let mut before_confirmation = None;
+                let response = tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        tokio::select! {
+                            response = &mut task => break response.unwrap(),
+                            Some(resume) = checks.recv() => {
+                                let state = db.get_mfa_state(uid).await.unwrap().unwrap();
+                                if before_confirmation.is_none() && state.totp_secret_enc.is_some() {
+                                    // The secret-store transaction has committed. The request's
+                                    // next clock read is the confirmation verdict timestamp.
+                                    before_confirmation = Some(state);
+                                    match case {
+                                        "revoked" => {
+                                            assert!(db.delete_session(&session.id_hash).await.unwrap());
+                                        }
+                                        "expired" => clock.time.advance(120),
+                                        "live" => {}
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                resume.send(()).unwrap();
+                            }
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                clock.armed.store(false, Ordering::SeqCst);
+                let before = before_confirmation.unwrap();
+                let secret = secret_of_state(&auth, uid, &before).unwrap();
+                assert!(!response.headers().contains_key(header::SET_COOKIE));
+                if case == "live" {
+                    assert_eq!(response.status(), StatusCode::OK);
+                } else {
+                    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                    assert_eq!(
+                        response.headers().get(header::LOCATION).unwrap(),
+                        "/mfa/enroll"
+                    );
+                }
+                let bytes = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+                let html = std::str::from_utf8(&bytes).unwrap();
+                for marker in ["otpauth", "data:image", "class=\"secret\"", INVALID_CODE] {
+                    assert_eq!(
+                        html.contains(marker),
+                        case == "live",
+                        "{case}, proven={proven}: {marker}"
+                    );
+                }
+                assert_eq!(html.contains(&totp::base32_encode(&secret)), case == "live");
+                let after = db.get_mfa_state(uid).await.unwrap().unwrap();
+                assert_eq!(after.totp_secret_enc, before.totp_secret_enc);
+                assert!(!after.totp_enabled);
+                assert_eq!(after.totp_last_step, before.totp_last_step);
+                assert_eq!(test.i64("SELECT count(*) FROM recovery_code").await, 0);
+                assert_eq!(
+                    test.i64("SELECT count(*) FROM session WHERE stage = 'active'")
+                        .await,
+                    0
+                );
+                if case != "live" {
+                    let response = app
+                        .oneshot(
+                            Request::get("/mfa/enroll")
+                                .header(header::HOST, "localhost")
+                                .header(header::COOKIE, cookie)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_secret_refused(response).await;
+                }
+            }
+        }
     }
 
     #[tokio::test]

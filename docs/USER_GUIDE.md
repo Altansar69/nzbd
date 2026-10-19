@@ -49,6 +49,9 @@ the navigation folds into a **Menu** button in the top bar, so the search box is
   the Last link are left out, Next still works), and *The search index is being rebuilt* (after a restore or an index
   repair: the list shows the newest releases only, with the category filter; search, sorting and the other filters come
   back when the rebuild is done).
+- With hidden categories, prefix and approximate searches show a fixed notice that they use a limited set of
+  alternatives. It does not reveal whether hidden words exhausted a budget. Results remain approximate at the
+  dictionary, posting or time limits; use more specific terms to find additional matches.
 - New uploads and edits appear in the list and in search within a few seconds (the search index trails the database
   slightly); the release page itself is always current.
 - **Filters**: the search row has the text, the category (children indented) and the **Search** button; **More filters**

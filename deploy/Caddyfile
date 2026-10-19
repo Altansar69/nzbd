@@ -76,7 +76,7 @@
 			# nzbd closes a keep-alive connection idle for 10 s (its header deadline): drop ours first,
 			# or a request sent on a connection being closed fails with a 502.
 			transport http {
-				keepalive_idle_timeout 8s
+				keepalive 8s
 			}
 		}
 	}
@@ -93,7 +93,7 @@
 			# nzbd closes a keep-alive connection idle for 10 s (its header deadline): drop ours first,
 			# or a request sent on a connection being closed fails with a 502.
 			transport http {
-				keepalive_idle_timeout 8s
+				keepalive 8s
 			}
 		}
 	}
@@ -109,7 +109,7 @@
 			# nzbd closes a keep-alive connection idle for 10 s (its header deadline): drop ours first,
 			# or a request sent on a connection being closed fails with a 502.
 			transport http {
-				keepalive_idle_timeout 8s
+				keepalive 8s
 			}
 		}
 	}

@@ -301,6 +301,15 @@ repo! {
         fn get_user_by_username(&self, username: &str) -> Result<Option<UserRow>, StoreError>;
         /// Inserts a session and revokes the oldest of the same stage beyond `max_per_stage`.
         fn insert_session(&self, s: &NewSession, max_per_stage: u32) -> Result<(), StoreError>;
+        /// Issues a pending login only if the observed credentials still match, atomically with
+        /// optional cookie replacement and the per-stage cap. Stale state returns `NotFound`.
+        fn insert_login_session(
+            &self,
+            seen: &LoginUser,
+            s: &NewSession,
+            replacing: Option<&[u8; 32]>,
+            max_per_stage: u32,
+        ) -> Result<(), StoreError>;
         /// Issues a single-use recovery code for a uploader/viewer (admin session, re-authenticated by
         /// the caller).
         fn issue_recovery(

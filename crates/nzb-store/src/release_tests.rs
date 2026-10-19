@@ -415,14 +415,14 @@ async fn exclude_categories_applies_to_search_totals_and_log() {
         .await
         .unwrap();
     }
-    // A failed row without a release is always kept.
+    // A failed row without any release identity remains visible.
     db.log_ingest(
         &IngestLogEntry {
             ts: 9,
             source: LogSource::Watch,
             api_key_id: None,
             source_name: Some("bad.nzb"),
-            sha256: Some(sha(99)),
+            sha256: None,
             outcome: LogOutcome::Failed,
             error_code: Some("NZB_XML"),
             detail: None,
@@ -459,7 +459,8 @@ async fn exclude_categories_applies_to_search_totals_and_log() {
 }
 
 /// Duplicate rows carry no release id, only the sha256 of the hidden release's NZB: they must be hidden
-/// with it, while unrelated rows (and failures) stay. Both legs of the exclusion (id and sha256) are
+/// with it. Unresolved digest-bearing failures are also hidden when categories are excluded.
+/// Both legs of the exclusion (id and sha256) are
 /// probed per log row, not materialised.
 #[tokio::test]
 async fn excluded_log_hides_rows_by_release_id_and_by_sha256() {
@@ -505,7 +506,7 @@ async fn excluded_log_hides_rows_by_release_id_and_by_sha256() {
         .iter()
         .map(|r| r.ts)
         .collect();
-    assert_eq!(ts, [5, 4, 3]);
+    assert_eq!(ts, [4, 3]);
 }
 
 /// SEC-095 (degraded mode, review 30 L5, review 35 L5): on SQLite too, one page never walks more than

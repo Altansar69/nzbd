@@ -283,3 +283,6 @@ pub fn router_with_upload(
         .then(|| auth.config().invite_path.clone());
     harden_with(app, cfg, invite)
 }
+
+#[cfg(test)]
+mod log_visibility_tests;

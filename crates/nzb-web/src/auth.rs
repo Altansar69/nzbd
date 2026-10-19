@@ -18,8 +18,8 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nzb_store::{
-    AccountActor, AccountPolicy, AttemptContext, AuditActor, AuditEntry, NewSession, Role,
-    SessionStage, Store, StoreError,
+    AccountActor, AccountPolicy, AttemptContext, AuditActor, AuditEntry, LoginUser, NewSession,
+    Role, SessionStage, Store, StoreError,
 };
 use tokio::sync::{Semaphore, mpsc};
 
@@ -661,6 +661,22 @@ impl AuthState {
             && v.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
         .then(|| v.to_owned())
+    }
+
+    /// Issues a pending login bound to the credentials that passed the password verdict.
+    /// A concurrent credential change returns `Store(NotFound)` without issuing a cookie.
+    pub(crate) async fn start_login_session(
+        &self,
+        seen: &LoginUser,
+        meta: &ClientMeta,
+        replacing: Option<&[u8; 32]>,
+    ) -> Result<HeaderValue, AuthError> {
+        let (new, cookie, _) = self.prepare_session(seen.id, SessionStage::PendingMfa, meta)?;
+        self.0
+            .db
+            .insert_login_session(seen, &new, replacing, self.0.cfg.max_sessions)
+            .await?;
+        Ok(cookie)
     }
 
     /// Mints a session for `user_id` at `stage`, replacing `replacing` atomically (rotation),
