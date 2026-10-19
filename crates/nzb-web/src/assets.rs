@@ -42,7 +42,7 @@ pub const ASSETS: &[Asset] = &[
         name: "app.js",
         mime: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../../../static/app.js"),
-        sha256: "9911cc2ab57df09fb96caae3f02270e9bcebfd646bd38bef9d68c7e773421de7",
+        sha256: "230e3587485987aa9196b42a8e1aec20567d4d52d72caaacaf2f8152075f0178",
     },
     Asset {
         name: "htmx.min.js",

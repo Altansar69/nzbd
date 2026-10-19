@@ -7,7 +7,7 @@
 {% if let Some(t) = layout.csrf_token %}<meta name="csrf-token" content="{{ t }}">
 {% endif %}<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/static/app.css?v={{ layout.css_ver }}">
-{% if let Some(v) = layout.htmx_ver %}<meta name="htmx-config" content="{&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false,&quot;includeIndicatorStyles&quot;:false,&quot;historyCacheSize&quot;:0,&quot;selfRequestsOnly&quot;:true}">
+{% if let Some(v) = layout.htmx_ver %}<meta name="htmx-config" content="{&quot;allowEval&quot;:false,&quot;allowScriptTags&quot;:false,&quot;includeIndicatorStyles&quot;:false,&quot;historyCacheSize&quot;:0,&quot;refreshOnHistoryMiss&quot;:true,&quot;selfRequestsOnly&quot;:true}">
 <script src="/static/htmx.min.js?v={{ v }}" defer></script>
 {% endif %}<script src="/static/app.js?v={{ layout.js_ver }}" defer></script>
 </head>

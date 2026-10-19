@@ -53,7 +53,7 @@
 <section aria-labelledby="files-h">
 <h2 id="files-h">Files</h2>
 {% if files.is_empty() %}<p class="muted" role="status">No files.</p>{% else %}
-<div id="files" hx-target="#files" hx-select="#files" hx-swap="outerHTML">
+<div id="files" tabindex="-1" hx-target="#files" hx-select="#files" hx-swap="outerHTML" hx-sync="this:replace">
 <p class="muted" role="status">Showing {{ first }}-{{ last }} of {{ total_files }} files (page {{ page }} of {{ pages }}).</p>
 <form method="post" action="/release/{{ id }}/download/selected" id="selfiles" class="selection-form" aria-label="Download selected files" aria-describedby="files-selection-help">
 {% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">
@@ -78,10 +78,10 @@
 <p class="actions selbar"><button type="submit">Download selected</button> <span id="files-selection-help" class="muted">Select at least one file above. Downloads an NZB with only the files ticked on this page.</span></p>
 </form>
 <div class="pagerbar">
-<nav class="pager" aria-label="Files pagination" hx-boost="true">
-{% if let Some(h) = prev_href %}<a rel="prev" href="{{ h }}">Previous</a>{% else %}<span class="muted">Previous</span>{% endif %}
+<nav id="files-pagination" class="pager" tabindex="-1" aria-label="Files pagination" hx-boost="true">
+{% if let Some(h) = prev_href %}<a id="files-page-previous" rel="prev" href="{{ h }}">Previous</a>{% else %}<span class="muted">Previous</span>{% endif %}
 <span>Page {{ page }} of {{ pages }}</span>
-{% if let Some(h) = next_href %}<a rel="next" href="{{ h }}">Next</a>{% else %}<span class="muted">Next</span>{% endif %}
+{% if let Some(h) = next_href %}<a id="files-page-next" rel="next" href="{{ h }}">Next</a>{% else %}<span class="muted">Next</span>{% endif %}
 </nav>
 <form method="post" action="/page-size" class="perpage" aria-label="Files per page">
 {% if let Some(t) = layout.csrf_token %}<input type="hidden" name="csrf_token" value="{{ t }}">

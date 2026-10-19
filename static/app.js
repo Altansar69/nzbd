@@ -6,7 +6,8 @@ if (window.htmx && window.htmx.config) {
   cfg.allowEval = false;
   cfg.allowScriptTags = false;
   cfg.includeIndicatorStyles = false; // the CSP forbids the inline <style> htmx would inject
-  cfg.historyCacheSize = 0; // no page snapshots in localStorage
+  cfg.historyCacheSize = 0; // no private page snapshots in browser storage
+  cfg.refreshOnHistoryMiss = true; // native navigation cancels superseded history loads
   cfg.selfRequestsOnly = true;
 }
 // Adds the CSRF synchronizer token to every HTMX request (AUTH_SPEC, section CSRF).
@@ -94,6 +95,32 @@ document.addEventListener("htmx:configRequest", function (event) {
   document.addEventListener("DOMContentLoaded", reveal);
   document.addEventListener("htmx:afterSettle", reveal);
   document.addEventListener("pageshow", reveal);
+})();
+// HTMX restores focused controls by ID. If pagination removes that link, retain
+// a useful focus position, but only when navigation still held focus at the swap.
+(function () {
+  var pending = new WeakMap();
+  document.addEventListener("htmx:beforeSwap", function (event) {
+    var detail = event.detail;
+    var target = detail.target;
+    var active = document.activeElement;
+    if (!detail.shouldSwap || !detail.xhr || !target ||
+        (target.id !== "results" && target.id !== "files" && target.id !== "segments") ||
+        !active || active.tagName !== "A" || !active.id || !target.contains(active)) return;
+    var pager = active.closest("nav.pager");
+    if (!pager && !active.closest("thead")) return;
+    pending.set(detail.xhr, { target: target.id, pager: pager ? pager.id : null });
+  });
+  document.addEventListener("htmx:afterSwap", function (event) {
+    var restore = pending.get(event.detail.xhr);
+    if (!restore) return;
+    pending.delete(event.detail.xhr);
+    var active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement) return;
+    var fallback = (restore.pager && document.getElementById(restore.pager)) ||
+      document.getElementById(restore.target);
+    if (fallback) fallback.focus({ preventScroll: true });
+  });
 })();
 // Failed enhanced navigation must be visible; HTMX leaves 4xx/5xx responses unswapped.
 // Use fixed text, never inject the server's error document or request values into HTML.

@@ -360,6 +360,7 @@ struct FileState {
     date: Option<i64>,
     groups: Vec<String>,
     groups_seen: u32,
+    segments_seen: u32,
     bits: Vec<u64>,
     max_number: u32,
     distinct: u32,
@@ -699,6 +700,7 @@ impl Engine<'_> {
             date: None,
             groups: Vec::new(),
             groups_seen: 0,
+            segments_seen: 0,
             bits: Vec::new(),
             max_number: 0,
             distinct: 0,
@@ -798,6 +800,11 @@ impl Engine<'_> {
             .ok_or(limit(LimitName::SegmentsPerFile))?;
         if bytes > self.limits.max_segment_bytes {
             return Err(limit(LimitName::SegmentBytes));
+        }
+        // The per-file bound covers every element, not only distinct segment numbers.
+        f.segments_seen = f.segments_seen.saturating_add(1);
+        if f.segments_seen > max_segments {
+            return Err(limit(LimitName::SegmentsPerFile));
         }
         // Count every segment element (duplicates included) so duplicates cannot buy unbounded work.
         self.segments_total = self.segments_total.saturating_add(1);
